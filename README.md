@@ -3,8 +3,12 @@
 A .NET 8 WinForms application that hosts MMC (Microsoft Management Console)
 snap-ins **without depending on mmc.exe**. It implements the console-side
 half of the MMC snap-in protocol itself (the "Node Manager" role mmc.exe
-normally plays), so a snap-in loaded into this app cannot tell it apart
-from the real console at the COM level.
+normally plays): the COM interfaces, GUIDs and struct layouts are the real
+ones from the Windows SDK, not a simulation of them. That said, this is an
+independent reimplementation of a large, only-partially-documented part of
+Windows, done without a Windows machine to validate against - see "Known
+limitations and open risks" below before assuming any specific snap-in
+will just work.
 
 ## Why this exists / how it's built
 
@@ -18,14 +22,16 @@ the console they run inside implements the other half of the contract -
 
 This project implements that console side directly in C#/COM interop, so
 it can `CoCreateInstance` any snap-in registered on the machine (under
-`HKLM\SOFTWARE\Microsoft\Microsoft Management Console\SnapIns`) and drive
-it against a WinForms `TreeView` (scope pane) and `ListView` (result pane)
-instead of mmc.exe's own UI.
+`HKLM\SOFTWARE\Microsoft\MMC\SnapIns`) and drive it against a WinForms
+`TreeView` (scope pane) and `ListView` (result pane) instead of mmc.exe's
+own UI.
 
 All interface GUIDs and struct layouts (`SCOPEDATAITEM`, `RESULTDATAITEM`,
-etc.) were taken verbatim from the public Windows SDK's `mmc.idl`, since
-COM identity and struct marshaling both depend on getting these exactly
-right.
+etc.) were taken from the public Windows SDK's `mmc.idl` and hand-ported to
+C# interop declarations (there is no MIDL-to-.NET pipeline used here, so
+this was a manual transcription, cross-checked against the SDK source
+rather than generated from it - see "Known limitations" for what that
+implies).
 
 ## Project layout
 
@@ -62,30 +68,73 @@ loads one snap-in and drives it through the standard notification sequence.
   the real Win32 `PropertySheet()` API (so the snap-in's own page controls
   render normally).
 - Add / Remove snap-in, Refresh, status bar wired to `SetStatusText`.
+- `IConsoleVerb` (`QueryConsoleVerb`) answered with a real (if inert)
+  object instead of failing, since several snap-ins query/set standard
+  verb state (Rename, Delete, Refresh, ...) defensively during init and
+  a hard failure there is riskier than a no-op implementation.
 
-## Known limitations
+## Known limitations and open risks
 
-This is a from-scratch reimplementation of a nontrivial part of Windows,
-built and reviewed without access to a Windows machine to run it against
-real snap-ins. Treat it as a solid, genuinely-COM-correct starting point,
-not a drop-in mmc.exe replacement:
+This is a from-scratch reimplementation of a nontrivial, only partially
+documented part of Windows, written and reviewed without access to a
+Windows machine to compile or run it against real snap-ins. Two real bugs
+were already found and fixed this way (see git history): the registry path
+this app read from was wrong (`...\Microsoft Management Console\SnapIns`
+instead of the actual `...\MMC\SnapIns`, which would have made the snap-in
+picker come up empty on every machine), and scope-item insertion mishandled
+`SDI_PREVIOUS`/`SDI_NEXT` relative positioning (siblings could be inserted
+as children of the wrong node). Both are the kind of defect that only shows
+up by reading the spec very literally or by running against a real
+snap-in - and this project has had the former but not the latter. Assume
+more exist and treat this as a serious-but-unverified starting point, not
+a finished, drop-in mmc.exe replacement:
 
 - **No extension snap-ins** (`IExtendContextMenu`, `IExtendControlbar`,
   dynamic `AddExtension`) - only *standalone* (primary) snap-ins are
-  supported. Some built-in consoles (e.g. Computer Management) are
-  themselves just a shell that only works via extensions and won't be
-  useful here; single-purpose standalone snap-ins are the realistic target.
-- **No taskpads, no custom OCX/web result views** - list/report view only.
-- **No .msc save/load** - snap-ins are added per-session via the picker.
+  supported. Consoles that are themselves just a shell around extensions
+  (e.g. Computer Management) won't be useful here; single-purpose
+  standalone snap-ins are the realistic target.
+- **No taskpads, no custom OCX/web result views, no toolbars/controlbars**
+  - list/report view only.
+- **No .msc save/load, no persistence** - snap-ins are added per-session via
+  the picker, and nothing is passed to a snap-in to tell it *what* to
+  target. Several well-known snap-ins need exactly that at add-time -
+  Certificates asks "My user account / Service account / Computer
+  account", Group Policy Object Editor needs a GPO target - normally
+  supplied through mechanisms (wizard pages, `.msc`-stored init data) this
+  host doesn't implement. Expect these specific snap-ins to load in a
+  degraded, default, or non-functional state rather than to work fully.
 - **No multi-select, cut/copy/paste/drag-drop.**
 - Some snap-ins may simply refuse to run outside mmc.exe if they check for
   it explicitly, or rely on undocumented behavior of MMC's real
-  implementation. If a snap-in fails to load, the app reports the COM
-  error rather than silently failing.
-- `Properties` calls `IExtendPropertySheet` without wiring up
-  `MMCPropertyChangeNotify` correlation, so "Apply" on a page won't refresh
-  the tree/list automatically - closing and reopening properties (or
-  Refresh) shows the change.
+  implementation that this reimplementation doesn't reproduce. If a
+  snap-in fails to load, the app reports the COM error rather than
+  silently failing - but a snap-in that loads without erroring is not
+  proof it's behaving correctly.
+- `Properties` calls `IExtendPropertySheet` and shows the resulting pages
+  with the real Win32 `PropertySheet()` API, but does not implement the
+  `MMCPropertyChangeNotify`/`MMCFreeNotifyHandle` handle-correlation
+  protocol a property page's own code may call into (these are exported
+  by `mmc.lib`/expected to resolve against the hosting console process).
+  Best case, "Apply" just won't refresh the tree/list automatically.
+  Worse case, for a page that calls these unconditionally, property pages
+  could fail to behave correctly or even to load - this has not been
+  verified against a real snap-in.
+- `MmcConsole.ActiveSession` is a single ambient "who's calling me right
+  now" field, set around each call into a snap-in
+  (`MmcConsole.RunWithSession`). This is correct for the synchronous,
+  same-thread reentrancy MMC's protocol is built around (a snap-in calling
+  back into `IConsoleNameSpace2.InsertItem` while still inside the
+  `Notify` call that asked it to), but it is **not** thread-safe: a
+  snap-in that calls back from a different thread (e.g. after a background
+  operation) would see the wrong - or no - active session. No such
+  guard/detection is implemented; this would surface as wrong data
+  attribution or a `NullReferenceException`, not a clean error.
+- The C# interop declarations in `Interop/` were hand-transcribed from
+  `mmc.idl` (cross-checked against the SDK source, not generated from it),
+  and only cover the interfaces this host actually uses. Treat any
+  interface/struct here as reviewed-but-unverified until it's been
+  exercised against a real snap-in on Windows.
 
 ## Building
 

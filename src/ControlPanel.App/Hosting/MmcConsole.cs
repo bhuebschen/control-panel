@@ -16,7 +16,7 @@ namespace ControlPanel.App.Hosting;
 /// handles and the WinForms TreeView/ListView actually shown to the user.
 /// </summary>
 [ComVisible(true)]
-internal sealed class MmcConsole : IConsole2, IConsoleNameSpace2, IHeaderCtrl2, IResultData, IDisplayHelp
+internal sealed class MmcConsole : IConsole2, IConsoleNameSpace2, IHeaderCtrl2, IResultData, IDisplayHelp, IConsoleVerb
 {
     private readonly TreeView _tree;
     private readonly ListView _list;
@@ -132,7 +132,7 @@ internal sealed class MmcConsole : IConsole2, IConsoleNameSpace2, IHeaderCtrl2, 
         };
     }
 
-    public void QueryConsoleVerb(out IntPtr ppConsoleVerb) => throw new NotImplementedException();
+    public void QueryConsoleVerb(out IConsoleVerb ppConsoleVerb) => ppConsoleVerb = this;
 
     public void SelectScopeItem(IntPtr hScopeItem)
     {
@@ -180,11 +180,39 @@ internal sealed class MmcConsole : IConsole2, IConsoleNameSpace2, IHeaderCtrl2, 
             throw new InvalidOperationException("InsertItem called with no active snap-in session.");
         }
 
-        var parentHandle = item.relativeID;
-        TreeNode parentUiNode = _consoleRoot;
-        if (parentHandle != IntPtr.Zero && _scopeNodesByHandle.TryGetValue(parentHandle, out var parentNode) && parentNode.UiNode is not null)
+        // The top 4 bits of mask say how relativeID relates to the new item:
+        // SDI_PARENT (default, 0): relativeID IS the parent's handle.
+        // SDI_PREVIOUS / SDI_NEXT: relativeID is a SIBLING handle instead -
+        // the real parent is that sibling's own parent. Treating relativeID
+        // as "always the parent" (as an earlier version of this method did)
+        // inserts every SDI_PREVIOUS/SDI_NEXT item as a *child* of the
+        // sibling it was supposed to be next to.
+        uint relKind = item.mask & 0xF0000000;
+        IntPtr parentHandle;
+        TreeNode parentUiNode;
+        int insertAt;
+
+        if (relKind is MmcConsts.SDI_PREVIOUS or MmcConsts.SDI_NEXT)
         {
-            parentUiNode = parentNode.UiNode;
+            if (!_scopeNodesByHandle.TryGetValue(item.relativeID, out var sibling) || sibling.UiNode is null)
+            {
+                throw new InvalidOperationException("InsertItem: SDI_PREVIOUS/SDI_NEXT relativeID does not refer to a known item.");
+            }
+
+            parentHandle = sibling.ParentHandle;
+            parentUiNode = sibling.UiNode.Parent ?? _consoleRoot;
+            insertAt = relKind == MmcConsts.SDI_PREVIOUS ? sibling.UiNode.Index + 1 : sibling.UiNode.Index;
+        }
+        else
+        {
+            parentHandle = item.relativeID;
+            parentUiNode = _consoleRoot;
+            if (parentHandle != IntPtr.Zero && _scopeNodesByHandle.TryGetValue(parentHandle, out var parentNode) && parentNode.UiNode is not null)
+            {
+                parentUiNode = parentNode.UiNode;
+            }
+
+            insertAt = (item.mask & MmcConsts.SDI_FIRST) != 0 ? 0 : parentUiNode.Nodes.Count;
         }
 
         var handle = new IntPtr(_nextScopeHandle++);
@@ -227,12 +255,6 @@ internal sealed class MmcConsole : IConsole2, IConsoleNameSpace2, IHeaderCtrl2, 
             SelectedImageIndex = node.OpenImageIndex >= 0 ? node.OpenImageIndex : node.ImageIndex,
         };
         node.UiNode = uiNode;
-
-        int insertAt = parentUiNode.Nodes.Count;
-        if ((item.mask & 0xF0000000) == MmcConsts.SDI_PREVIOUS && _scopeNodesByHandle.TryGetValue(item.relativeID, out var prevSibling) && prevSibling.UiNode is not null)
-        {
-            insertAt = prevSibling.UiNode.Index + 1;
-        }
 
         if (node.HasChildren)
         {
@@ -678,6 +700,32 @@ internal sealed class MmcConsole : IConsole2, IConsoleNameSpace2, IHeaderCtrl2, 
             // Help viewer not available - nothing sensible to fall back to.
         }
     }
+
+    // ------------------------------------------------------------------
+    // IConsoleVerb
+    //
+    // Many snap-ins call QueryConsoleVerb defensively during Initialize to
+    // enable/disable standard verbs (Rename, Delete, Refresh, ...) for the
+    // node type they're showing. We don't render a verb-driven toolbar/menu
+    // ourselves, but we still track the requested state so a snap-in gets
+    // real (if inert) answers back instead of every call failing with
+    // E_NOTIMPL, which is what happened before this was added and which
+    // some snap-ins may not handle as gracefully as the HRESULT contract
+    // technically allows.
+    // ------------------------------------------------------------------
+
+    private readonly Dictionary<(MMC_CONSOLE_VERB, MMC_BUTTON_STATE), bool> _verbState = new();
+    private MMC_CONSOLE_VERB _defaultVerb = MMC_CONSOLE_VERB.MMC_VERB_PROPERTIES;
+
+    public void GetVerbState(MMC_CONSOLE_VERB eCmdID, MMC_BUTTON_STATE nState, out bool pState) =>
+        pState = _verbState.TryGetValue((eCmdID, nState), out var value) ? value : nState == MMC_BUTTON_STATE.ENABLED;
+
+    public void SetVerbState(MMC_CONSOLE_VERB eCmdID, MMC_BUTTON_STATE nState, bool bState) =>
+        _verbState[(eCmdID, nState)] = bState;
+
+    public void SetDefaultVerb(MMC_CONSOLE_VERB eCmdID) => _defaultVerb = eCmdID;
+
+    public void GetDefaultVerb(out MMC_CONSOLE_VERB peCmdID) => peCmdID = _defaultVerb;
 
     // ------------------------------------------------------------------
     // Helpers used by SnapInSession / MainForm

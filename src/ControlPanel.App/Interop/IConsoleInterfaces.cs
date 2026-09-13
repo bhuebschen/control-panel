@@ -26,7 +26,7 @@ internal interface IConsole
         [MarshalAs(UnmanagedType.LPWStr)] string lpszTitle,
         uint fuStyle,
         out int piRetval);
-    void QueryConsoleVerb(out IntPtr ppConsoleVerb);
+    void QueryConsoleVerb(out IConsoleVerb ppConsoleVerb);
     void SelectScopeItem(IntPtr hScopeItem);
     void GetMainWindow(out IntPtr phwnd);
     void NewWindow(IntPtr hScopeItem, uint lOptions);
@@ -49,7 +49,7 @@ internal interface IConsole2 : IConsole
         [MarshalAs(UnmanagedType.LPWStr)] string lpszTitle,
         uint fuStyle,
         out int piRetval);
-    new void QueryConsoleVerb(out IntPtr ppConsoleVerb);
+    new void QueryConsoleVerb(out IConsoleVerb ppConsoleVerb);
     new void SelectScopeItem(IntPtr hScopeItem);
     new void GetMainWindow(out IntPtr phwnd);
     new void NewWindow(IntPtr hScopeItem, uint lOptions);
@@ -176,4 +176,15 @@ internal interface IPropertySheetCallback
 internal interface IContextMenuCallback
 {
     void AddItem(ref CONTEXTMENUITEM pItem);
+}
+
+[ComImport]
+[Guid("E49F7A60-74AF-11D0-A286-00C04FD8FE93")]
+[InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+internal interface IConsoleVerb
+{
+    void GetVerbState(MMC_CONSOLE_VERB eCmdID, MMC_BUTTON_STATE nState, [MarshalAs(UnmanagedType.Bool)] out bool pState);
+    void SetVerbState(MMC_CONSOLE_VERB eCmdID, MMC_BUTTON_STATE nState, [MarshalAs(UnmanagedType.Bool)] bool bState);
+    void SetDefaultVerb(MMC_CONSOLE_VERB eCmdID);
+    void GetDefaultVerb(out MMC_CONSOLE_VERB peCmdID);
 }

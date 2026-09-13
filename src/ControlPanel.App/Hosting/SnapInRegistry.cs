@@ -7,11 +7,13 @@ namespace ControlPanel.App.Hosting;
 /// <summary>
 /// Enumerates snap-ins registered on the machine the same way mmc.exe's
 /// "Add/Remove Snap-in" dialog does: under
-/// HKLM\SOFTWARE\Microsoft\Microsoft Management Console\SnapIns\{CLSID}.
+/// HKLM\SOFTWARE\Microsoft\MMC\SnapIns\{CLSID}. (Not
+/// "...\Microsoft Management Console\SnapIns" - that key doesn't exist;
+/// per the MMC SDK docs, "MMC" is the literal registry key name.)
 /// </summary>
 internal static class SnapInRegistry
 {
-    private const string SnapInsKeyPath = @"SOFTWARE\Microsoft\Microsoft Management Console\SnapIns";
+    private const string SnapInsKeyPath = @"SOFTWARE\Microsoft\MMC\SnapIns";
 
     public static List<SnapInInfo> EnumerateSnapIns()
     {

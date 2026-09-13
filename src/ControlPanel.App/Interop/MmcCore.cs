@@ -68,6 +68,29 @@ internal enum MMC_RESULT_VIEW_STYLE
     MMC_ENSUREFOCUSVISIBLE = 0x0008,
 }
 
+internal enum MMC_CONSOLE_VERB
+{
+    MMC_VERB_NONE = 0x0000,
+    MMC_VERB_OPEN = 0x8000,
+    MMC_VERB_COPY = 0x8001,
+    MMC_VERB_PASTE = 0x8002,
+    MMC_VERB_DELETE = 0x8003,
+    MMC_VERB_PROPERTIES = 0x8004,
+    MMC_VERB_RENAME = 0x8005,
+    MMC_VERB_REFRESH = 0x8006,
+    MMC_VERB_PRINT = 0x8007,
+    MMC_VERB_CUT = 0x8008,
+}
+
+internal enum MMC_BUTTON_STATE
+{
+    ENABLED = 0x01,
+    CHECKED = 0x02,
+    HIDDEN = 0x04,
+    INDETERMINATE = 0x08,
+    BUTTONPRESSED = 0x10,
+}
+
 internal static class MmcConsts
 {
     // SCOPEDATAITEM.mask (SDI_*)
