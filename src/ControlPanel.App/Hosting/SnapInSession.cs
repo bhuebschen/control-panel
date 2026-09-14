@@ -1,6 +1,8 @@
 using System.Runtime.InteropServices;
 using System.Runtime.InteropServices.ComTypes;
 using ControlPanel.App.Interop;
+using ControlPanel.App.Native;
+using Microsoft.Win32;
 
 namespace ControlPanel.App.Hosting;
 
@@ -19,6 +21,8 @@ internal sealed class SnapInSession
 
     public static SnapInSession Load(SnapInInfo info, MmcConsole console)
     {
+        CheckBitnessCompatibility(info);
+
         var type = Type.GetTypeFromCLSID(info.Clsid, throwOnError: true)!;
         var comObject = Activator.CreateInstance(type)
             ?? throw new InvalidOperationException($"CoCreateInstance returned null for {info.Name}.");
@@ -49,6 +53,34 @@ internal sealed class SnapInSession
         });
 
         return session;
+    }
+
+    /// <summary>
+    /// An in-process (InprocServer32) COM DLL must match the host process's
+    /// bitness - a 32-bit-only snap-in cannot load into a 64-bit host, or
+    /// vice versa. Without this check, that failure surfaces from
+    /// CoCreateInstance as REGDB_E_CLASSNOTREG - the exact same HRESULT as
+    /// "not installed at all" - making the real cause impossible to tell
+    /// from the error alone. Out-of-process (LocalServer32) servers are not
+    /// affected by this - COM marshals across bitness boundaries fine for
+    /// those - so this only checks the Inproc case.
+    /// </summary>
+    private static void CheckBitnessCompatibility(SnapInInfo info)
+    {
+        using var clsidKey = Registry.ClassesRoot.OpenSubKey($@"CLSID\{info.Clsid:B}\InprocServer32");
+        if (clsidKey?.GetValue(null) is not string rawPath || string.IsNullOrWhiteSpace(rawPath))
+        {
+            return; // Out-of-process server, or nothing registered (CoCreateInstance will report that clearly).
+        }
+
+        var path = Environment.ExpandEnvironmentVariables(rawPath);
+        if (!PeImage.IsLikelyCompatibleWithCurrentProcess(path, out var dllMachine))
+        {
+            throw new InvalidOperationException(
+                $"'{info.Name}' is registered as a {dllMachine} DLL ({path}), but this host is running as " +
+                $"{PeImage.CurrentProcessMachine}. An in-process COM server must match the host process's " +
+                "architecture - rebuild/run this host for that architecture, or use a snap-in build that matches it.");
+        }
     }
 
     private static void SendAddImages(MmcConsole console, SnapInSession session)
@@ -112,6 +144,23 @@ internal sealed class SnapInSession
             var dataObject = TryGetScopeDataObject(node);
             Component.Notify(dataObject, MMC_NOTIFY_TYPE.MMCN_SELECT, MakeSelectArg(scope: true, select: false), IntPtr.Zero);
             Component.Notify(null, MMC_NOTIFY_TYPE.MMCN_SHOW, IntPtr.Zero, node.Handle);
+        });
+    }
+
+    /// <summary>
+    /// Real MMC sends MMCN_SELECT for result-pane selection changes too
+    /// (bScope=FALSE), not just for the scope tree - several snap-ins only
+    /// enable/disable standard verbs (Properties in particular) in response
+    /// to *which* result row is selected, via IConsoleVerb.SetVerbState
+    /// inside their MMCN_SELECT handler. Without this, verb state would
+    /// only ever reflect the last-selected scope node.
+    /// </summary>
+    public void NotifyResultSelect(MmcConsole console, ResultRow row, bool selected)
+    {
+        console.RunWithSession(this, () =>
+        {
+            var dataObject = TryGetResultDataObject(row);
+            Component.Notify(dataObject, MMC_NOTIFY_TYPE.MMCN_SELECT, MakeSelectArg(scope: false, select: selected), IntPtr.Zero);
         });
     }
 

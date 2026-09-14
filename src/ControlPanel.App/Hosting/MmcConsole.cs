@@ -2,6 +2,7 @@ using System.Linq;
 using System.Runtime.InteropServices;
 using System.Windows.Forms;
 using ControlPanel.App.Interop;
+using ControlPanel.App.Native;
 
 namespace ControlPanel.App.Hosting;
 
@@ -91,7 +92,12 @@ internal sealed class MmcConsole : IConsole2, IConsoleNameSpace2, IHeaderCtrl2, 
     {
     }
 
-    public void QueryResultView(out object pUnknown) => throw new NotImplementedException();
+    public void QueryResultView(out object pUnknown)
+    {
+        Diagnostics.Log("QueryResultView: custom OCX/web result views are not supported by this host.");
+        pUnknown = null!;
+        throw new NotImplementedException("This host only supports the default list/report result view, not a custom OCX or web view.");
+    }
 
     public void QueryScopeImageList(out IImageList ppImageList) => ppImageList = ScopeImages;
 
@@ -144,7 +150,11 @@ internal sealed class MmcConsole : IConsole2, IConsoleNameSpace2, IHeaderCtrl2, 
 
     public void GetMainWindow(out IntPtr phwnd) => phwnd = _ownerForm.Handle;
 
-    public void NewWindow(IntPtr hScopeItem, uint lOptions) => throw new NotImplementedException();
+    public void NewWindow(IntPtr hScopeItem, uint lOptions)
+    {
+        Diagnostics.Log($"NewWindow: multiple console windows are not supported by this host (requested root handle 0x{hScopeItem:X}).");
+        throw new NotImplementedException("This host only supports a single window rooted at Console Root.");
+    }
 
     public void Expand(IntPtr hItem, bool bExpand)
     {

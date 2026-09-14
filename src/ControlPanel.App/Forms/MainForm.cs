@@ -3,6 +3,7 @@ using System.Linq;
 using System.Windows.Forms;
 using ControlPanel.App.Hosting;
 using ControlPanel.App.Interop;
+using ControlPanel.App.Native;
 
 namespace ControlPanel.App.Forms;
 
@@ -18,6 +19,10 @@ internal sealed class MainForm : Form
     private readonly ContextMenuStrip _treeContextMenu;
     private readonly ContextMenuStrip _listContextMenu;
     private readonly ToolStripMenuItem _removeSnapInMenuItem;
+    private readonly ToolStripMenuItem _propertiesMenuItem;
+    private readonly ToolStripMenuItem _refreshMenuItem;
+    private readonly ToolStripButton _propertiesToolButton;
+    private readonly ToolStripButton _refreshToolButton;
 
     private readonly MmcConsole _console;
     private readonly List<SnapInSession> _sessions = new();
@@ -57,6 +62,7 @@ internal sealed class MainForm : Form
         _list.RetrieveVirtualItem += List_RetrieveVirtualItem;
         _list.MouseDoubleClick += List_MouseDoubleClick;
         _list.MouseClick += List_MouseClick;
+        _list.ItemSelectionChanged += List_ItemSelectionChanged;
 
         var splitContainer = new SplitContainer
         {
@@ -80,18 +86,20 @@ internal sealed class MainForm : Form
         fileMenu.DropDownItems.Add(exitItem);
 
         var actionMenu = new ToolStripMenuItem("&Action");
-        var propertiesItem = new ToolStripMenuItem("&Properties", null, (_, _) => ShowScopePropertiesForSelection());
-        var refreshItem = new ToolStripMenuItem("&Refresh", null, (_, _) => RefreshCurrentView());
-        actionMenu.DropDownItems.Add(propertiesItem);
-        actionMenu.DropDownItems.Add(refreshItem);
+        _propertiesMenuItem = new ToolStripMenuItem("&Properties", null, (_, _) => ShowScopePropertiesForSelection());
+        _refreshMenuItem = new ToolStripMenuItem("&Refresh", null, (_, _) => RefreshCurrentView());
+        actionMenu.DropDownItems.Add(_propertiesMenuItem);
+        actionMenu.DropDownItems.Add(_refreshMenuItem);
 
         menuStrip.Items.Add(fileMenu);
         menuStrip.Items.Add(actionMenu);
 
         var toolStrip = new ToolStrip();
         toolStrip.Items.Add(new ToolStripButton("Add Snap-in...", null, (_, _) => AddSnapIn()));
-        toolStrip.Items.Add(new ToolStripButton("Properties", null, (_, _) => ShowScopePropertiesForSelection()));
-        toolStrip.Items.Add(new ToolStripButton("Refresh", null, (_, _) => RefreshCurrentView()));
+        _propertiesToolButton = new ToolStripButton("Properties", null, (_, _) => ShowScopePropertiesForSelection());
+        _refreshToolButton = new ToolStripButton("Refresh", null, (_, _) => RefreshCurrentView());
+        toolStrip.Items.Add(_propertiesToolButton);
+        toolStrip.Items.Add(_refreshToolButton);
 
         _treeContextMenu = new ContextMenuStrip();
         _treeContextMenu.Items.Add("Properties", null, (_, _) => ShowScopePropertiesForSelection());
@@ -111,6 +119,7 @@ internal sealed class MainForm : Form
         _console.StatusTextChanged += text => _statusLabel.Text = text;
 
         _consoleRootNode.Expand();
+        UpdateVerbBasedUiState();
 
         // SplitterDistance can only be set once the container has its real,
         // final size - setting it any earlier (e.g. in an object initializer,
@@ -145,6 +154,7 @@ internal sealed class MainForm : Form
         }
         catch (Exception ex)
         {
+            Diagnostics.Log($"Failed to load '{picker.SelectedSnapIn.Name}' ({picker.SelectedSnapIn.Clsid}): {ex}");
             MessageBox.Show(
                 this,
                 $"Could not load '{picker.SelectedSnapIn.Name}':\n{ex.Message}\n\n" +
@@ -188,6 +198,7 @@ internal sealed class MainForm : Form
         // dictionaries (recursively, for the whole subtree) as well as the
         // visible TreeNode, matching what a snap-in itself would trigger.
         ((IConsoleNameSpace)_console).DeleteItem(node.Handle, 1);
+        UpdateVerbBasedUiState();
     }
 
     private void Tree_BeforeExpand(object? sender, TreeViewCancelEventArgs e)
@@ -216,6 +227,37 @@ internal sealed class MainForm : Form
         _currentNode = node;
         node.Session.ShowResults(_console, node);
         _statusLabel.Text = node.DisplayName;
+        UpdateVerbBasedUiState();
+    }
+
+    private void List_ItemSelectionChanged(object? sender, ListViewItemSelectionChangedEventArgs e)
+    {
+        if (e.ItemIndex < 0 || e.ItemIndex >= _console.ResultRows.Count)
+        {
+            return;
+        }
+
+        var row = _console.ResultRows[e.ItemIndex];
+        row.Session.NotifyResultSelect(_console, row, e.IsSelected);
+        UpdateVerbBasedUiState();
+    }
+
+    /// <summary>
+    /// Reflects whatever the currently active snap-in last told our
+    /// IConsoleVerb (via SetVerbState, typically from inside its
+    /// MMCN_SELECT handler) onto the actual UI - a verb a snap-in disabled
+    /// stayed clickable until this was wired up.
+    /// </summary>
+    private void UpdateVerbBasedUiState()
+    {
+        bool hasSelection = _currentNode is not null;
+        _console.GetVerbState(MMC_CONSOLE_VERB.MMC_VERB_PROPERTIES, MMC_BUTTON_STATE.ENABLED, out bool propertiesEnabled);
+        _console.GetVerbState(MMC_CONSOLE_VERB.MMC_VERB_REFRESH, MMC_BUTTON_STATE.ENABLED, out bool refreshEnabled);
+
+        _propertiesMenuItem.Enabled = hasSelection && propertiesEnabled;
+        _propertiesToolButton.Enabled = hasSelection && propertiesEnabled;
+        _refreshMenuItem.Enabled = hasSelection && refreshEnabled;
+        _refreshToolButton.Enabled = hasSelection && refreshEnabled;
     }
 
     private void Tree_NodeMouseClick(object? sender, TreeNodeMouseClickEventArgs e)
@@ -303,6 +345,7 @@ internal sealed class MainForm : Form
         _list.Columns.Clear();
         _currentNode.ResultsLoaded = false;
         _currentNode.Session.ShowResults(_console, _currentNode);
+        UpdateVerbBasedUiState();
     }
 
     protected override void OnFormClosing(FormClosingEventArgs e)

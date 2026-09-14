@@ -68,10 +68,20 @@ loads one snap-in and drives it through the standard notification sequence.
   the real Win32 `PropertySheet()` API (so the snap-in's own page controls
   render normally).
 - Add / Remove snap-in, Refresh, status bar wired to `SetStatusText`.
-- `IConsoleVerb` (`QueryConsoleVerb`) answered with a real (if inert)
-  object instead of failing, since several snap-ins query/set standard
-  verb state (Rename, Delete, Refresh, ...) defensively during init and
-  a hard failure there is riskier than a no-op implementation.
+- `IConsoleVerb` (`QueryConsoleVerb`) is implemented and actually wired to
+  the UI: `MMCN_SELECT` is now sent for result-pane selection too (not just
+  the scope tree), and the Properties/Refresh menu items and toolbar
+  buttons reflect whatever verb state a snap-in last set - a snap-in that
+  disables Properties for a given item is respected, not just silently
+  stored.
+- A 32-/64-bit mismatch between the host process and an in-process
+  (`InprocServer32`) snap-in DLL is detected before `CoCreateInstance` is
+  even attempted, by reading the target DLL's PE header, so it surfaces as
+  a clear message instead of the same generic "class not registered" error
+  an unregistered snap-in would produce.
+- `QueryResultView`/`NewWindow` (custom OCX/web views, multiple console
+  windows - both out of scope, see below) log which snap-in hit them via
+  `Debug.WriteLine`, since this host can't be debugged remotely.
 
 ## Known limitations and open risks
 
