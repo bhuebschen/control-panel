@@ -97,7 +97,11 @@ empty on every machine); scope-item insertion mishandled
 `SDI_PREVIOUS`/`SDI_NEXT` relative positioning (siblings could be inserted
 as children of the wrong node); the central "Properties" action always
 opened the scope node's properties even when a result-pane row was
-selected; and `IConsoleVerb` state was a single dictionary that was never
+selected (first fixed by checking which pane had input focus at click
+time, then refined into an explicit `MainForm.ActivePane` field updated
+via `Control.Enter`, since a focus check alone breaks for keyboard/menu
+use and doesn't fall back sensibly when the result pane is active but
+empty); and `IConsoleVerb` state was a single dictionary that was never
 reset between selections, so a verb one snap-in disabled could stay
 disabled after switching to a completely unrelated node or snap-in. These
 are the kind of defects that only show up by reading the spec very

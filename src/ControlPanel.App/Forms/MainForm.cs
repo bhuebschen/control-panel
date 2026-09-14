@@ -28,6 +28,20 @@ internal sealed class MainForm : Form
     private readonly List<SnapInSession> _sessions = new();
     private ScopeNode? _currentNode;
 
+    private enum ActivePane { Scope, Result }
+
+    /// <summary>
+    /// Which pane the user was last actually in, for the one ambiguous
+    /// action - the shared Properties menu item/toolbar button - that isn't
+    /// tied to a specific right-click target. Set via Control.Enter rather
+    /// than checked via Control.Focused at click time: Enter fires once
+    /// when real focus moves into a pane and isn't disturbed by a menu or
+    /// toolbar transiently taking input focus while open (so choosing
+    /// Properties from the menu bar via the keyboard still targets whatever
+    /// pane was actually active before opening the menu).
+    /// </summary>
+    private ActivePane _activePane = ActivePane.Scope;
+
     public MainForm()
     {
         Text = "MMC Snap-in Host";
@@ -49,6 +63,7 @@ internal sealed class MainForm : Form
         _tree.BeforeExpand += Tree_BeforeExpand;
         _tree.AfterSelect += Tree_AfterSelect;
         _tree.NodeMouseClick += Tree_NodeMouseClick;
+        _tree.Enter += (_, _) => _activePane = ActivePane.Scope;
 
         _list = new ListView
         {
@@ -63,6 +78,7 @@ internal sealed class MainForm : Form
         _list.MouseDoubleClick += List_MouseDoubleClick;
         _list.MouseClick += List_MouseClick;
         _list.ItemSelectionChanged += List_ItemSelectionChanged;
+        _list.Enter += (_, _) => _activePane = ActivePane.Result;
 
         var splitContainer = new SplitContainer
         {
@@ -323,7 +339,12 @@ internal sealed class MainForm : Form
     /// </summary>
     private void ShowPropertiesForCurrentSelection()
     {
-        if (_list.Focused)
+        // Falls back to the scope node whenever the result pane was the
+        // active one but doesn't actually have a usable selection right
+        // now (empty list, or focus landed there without an item picked) -
+        // "nothing to show here" is a worse outcome than showing the tree
+        // selection that does exist.
+        if (_activePane == ActivePane.Result && _list.FocusedItem?.Tag is ResultRow)
         {
             ShowResultPropertiesForFocusedItem();
         }
