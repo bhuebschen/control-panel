@@ -128,6 +128,12 @@ internal sealed class SnapInSession
 
     public void ShowResults(MmcConsole console, ScopeNode node)
     {
+        // Verb state belongs to "whatever is selected right now", not to a
+        // snap-in or node persistently - reset it before handing the new
+        // selection to the snap-in, so a verb the *previous* selection (in
+        // this snap-in or a different one entirely) disabled doesn't leak
+        // into this one just because nothing here calls SetVerbState again.
+        console.ResetVerbStates();
         console.RunWithSession(this, () =>
         {
             var dataObject = TryGetScopeDataObject(node);
@@ -157,6 +163,14 @@ internal sealed class SnapInSession
     /// </summary>
     public void NotifyResultSelect(MmcConsole console, ResultRow row, bool selected)
     {
+        if (selected)
+        {
+            // Same reasoning as in ShowResults: a newly-selected row starts
+            // from a clean verb-state slate, not whatever the previously
+            // selected row (or the scope node itself) left behind.
+            console.ResetVerbStates();
+        }
+
         console.RunWithSession(this, () =>
         {
             var dataObject = TryGetResultDataObject(row);

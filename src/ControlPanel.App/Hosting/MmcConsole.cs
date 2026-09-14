@@ -714,14 +714,18 @@ internal sealed class MmcConsole : IConsole2, IConsoleNameSpace2, IHeaderCtrl2, 
     // ------------------------------------------------------------------
     // IConsoleVerb
     //
-    // Many snap-ins call QueryConsoleVerb defensively during Initialize to
-    // enable/disable standard verbs (Rename, Delete, Refresh, ...) for the
-    // node type they're showing. We don't render a verb-driven toolbar/menu
-    // ourselves, but we still track the requested state so a snap-in gets
-    // real (if inert) answers back instead of every call failing with
-    // E_NOTIMPL, which is what happened before this was added and which
-    // some snap-ins may not handle as gracefully as the HRESULT contract
-    // technically allows.
+    // Many snap-ins call QueryConsoleVerb during their MMCN_SELECT handler
+    // to enable/disable standard verbs (Rename, Delete, Refresh, ...) for
+    // whatever is now selected, and MainForm reflects that state onto the
+    // Properties/Refresh menu items and toolbar buttons. This state is
+    // scoped to "whatever is currently selected", not to a snap-in or
+    // node persistently - real MMC resets it before each new selection so
+    // a snap-in only needs to call SetVerbState for what it wants to
+    // change from the default. ResetVerbStates() must be called before
+    // every MMCN_SELECT(select=true); without it, a verb one item disabled
+    // stays disabled for every later selection that doesn't explicitly
+    // re-enable it, including selections in a completely different
+    // snap-in.
     // ------------------------------------------------------------------
 
     private readonly Dictionary<(MMC_CONSOLE_VERB, MMC_BUTTON_STATE), bool> _verbState = new();
@@ -736,6 +740,12 @@ internal sealed class MmcConsole : IConsole2, IConsoleNameSpace2, IHeaderCtrl2, 
     public void SetDefaultVerb(MMC_CONSOLE_VERB eCmdID) => _defaultVerb = eCmdID;
 
     public void GetDefaultVerb(out MMC_CONSOLE_VERB peCmdID) => peCmdID = _defaultVerb;
+
+    public void ResetVerbStates()
+    {
+        _verbState.Clear();
+        _defaultVerb = MMC_CONSOLE_VERB.MMC_VERB_PROPERTIES;
+    }
 
     // ------------------------------------------------------------------
     // Helpers used by SnapInSession / MainForm

@@ -78,7 +78,8 @@ loads one snap-in and drives it through the standard notification sequence.
   (`InprocServer32`) snap-in DLL is detected before `CoCreateInstance` is
   even attempted, by reading the target DLL's PE header, so it surfaces as
   a clear message instead of the same generic "class not registered" error
-  an unregistered snap-in would produce.
+  an unregistered snap-in would produce. **This is not full 32-/64-bit
+  support** - see "Known limitations".
 - `QueryResultView`/`NewWindow` (custom OCX/web views, multiple console
   windows - both out of scope, see below) log which snap-in hit them via
   `Debug.WriteLine`, since this host can't be debugged remotely.
@@ -87,15 +88,21 @@ loads one snap-in and drives it through the standard notification sequence.
 
 This is a from-scratch reimplementation of a nontrivial, only partially
 documented part of Windows, written and reviewed without access to a
-Windows machine to compile or run it against real snap-ins. Two real bugs
-were already found and fixed this way (see git history): the registry path
-this app read from was wrong (`...\Microsoft Management Console\SnapIns`
-instead of the actual `...\MMC\SnapIns`, which would have made the snap-in
-picker come up empty on every machine), and scope-item insertion mishandled
+Windows machine to compile or run it against real snap-ins. Several real
+bugs were already found and fixed this way (see git history), all from
+external review rather than execution: the registry path this app read
+from was wrong (`...\Microsoft Management Console\SnapIns` instead of the
+actual `...\MMC\SnapIns`, which would have made the snap-in picker come up
+empty on every machine); scope-item insertion mishandled
 `SDI_PREVIOUS`/`SDI_NEXT` relative positioning (siblings could be inserted
-as children of the wrong node). Both are the kind of defect that only shows
-up by reading the spec very literally or by running against a real
-snap-in - and this project has had the former but not the latter. Assume
+as children of the wrong node); the central "Properties" action always
+opened the scope node's properties even when a result-pane row was
+selected; and `IConsoleVerb` state was a single dictionary that was never
+reset between selections, so a verb one snap-in disabled could stay
+disabled after switching to a completely unrelated node or snap-in. These
+are the kind of defects that only show up by reading the spec very
+literally or by running against a real snap-in - and this project has had
+plenty of the former, zero of the latter. Assume
 more exist and treat this as a serious-but-unverified starting point, not
 a finished, drop-in mmc.exe replacement:
 
@@ -115,6 +122,22 @@ a finished, drop-in mmc.exe replacement:
   host doesn't implement. Expect these specific snap-ins to load in a
   degraded, default, or non-functional state rather than to work fully.
 - **No multi-select, cut/copy/paste/drag-drop.**
+- **The 32-/64-bit check only covers one specific failure mode, not the
+  general problem.** This host runs as one process bitness (64-bit by
+  default), and `HKEY_LOCAL_MACHINE\SOFTWARE\...` is subject to WOW64
+  registry redirection: a 64-bit process transparently sees only the
+  64-bit view of `...\Microsoft\MMC\SnapIns` and `CLSID\...\InprocServer32`,
+  never the `WOW6432Node` view a 32-bit-only snap-in would be registered
+  under (and vice versa for a 32-bit build of this host). A 32-bit-only
+  snap-in therefore doesn't reach the bitness check at all - it simply
+  never appears in the Add Snap-in list to begin with, silently. The
+  check that does exist only catches the narrower case of a snap-in
+  that's visible in the current view but whose actual DLL turns out to
+  be the wrong architecture. Properly supporting both would mean
+  enumerating and offering the other bitness's view too (via
+  `RegistryKey.OpenBaseKey(..., RegistryView.Registry32/64)`) and being
+  honest in the picker about which of those this process can actually
+  load - not yet implemented.
 - Some snap-ins may simply refuse to run outside mmc.exe if they check for
   it explicitly, or rely on undocumented behavior of MMC's real
   implementation that this reimplementation doesn't reproduce. If a

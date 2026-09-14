@@ -86,7 +86,7 @@ internal sealed class MainForm : Form
         fileMenu.DropDownItems.Add(exitItem);
 
         var actionMenu = new ToolStripMenuItem("&Action");
-        _propertiesMenuItem = new ToolStripMenuItem("&Properties", null, (_, _) => ShowScopePropertiesForSelection());
+        _propertiesMenuItem = new ToolStripMenuItem("&Properties", null, (_, _) => ShowPropertiesForCurrentSelection());
         _refreshMenuItem = new ToolStripMenuItem("&Refresh", null, (_, _) => RefreshCurrentView());
         actionMenu.DropDownItems.Add(_propertiesMenuItem);
         actionMenu.DropDownItems.Add(_refreshMenuItem);
@@ -96,7 +96,7 @@ internal sealed class MainForm : Form
 
         var toolStrip = new ToolStrip();
         toolStrip.Items.Add(new ToolStripButton("Add Snap-in...", null, (_, _) => AddSnapIn()));
-        _propertiesToolButton = new ToolStripButton("Properties", null, (_, _) => ShowScopePropertiesForSelection());
+        _propertiesToolButton = new ToolStripButton("Properties", null, (_, _) => ShowPropertiesForCurrentSelection());
         _refreshToolButton = new ToolStripButton("Refresh", null, (_, _) => RefreshCurrentView());
         toolStrip.Items.Add(_propertiesToolButton);
         toolStrip.Items.Add(_refreshToolButton);
@@ -311,6 +311,27 @@ internal sealed class MainForm : Form
     }
 
     private void List_MouseDoubleClick(object? sender, MouseEventArgs e) => ShowResultPropertiesForFocusedItem();
+
+    /// <summary>
+    /// The single "Properties" action on the menu bar/toolbar has to guess
+    /// which pane the user means, since - unlike the tree's and list's own
+    /// context menus - it isn't tied to a specific right-click target.
+    /// ToolStrip items don't take focus away from whichever pane the user
+    /// was last in (clicking a toolbar button doesn't move focus in
+    /// WinForms), so checking which pane currently has focus reflects the
+    /// user's last interaction correctly.
+    /// </summary>
+    private void ShowPropertiesForCurrentSelection()
+    {
+        if (_list.Focused)
+        {
+            ShowResultPropertiesForFocusedItem();
+        }
+        else
+        {
+            ShowScopePropertiesForSelection();
+        }
+    }
 
     private void ShowScopePropertiesForSelection()
     {
