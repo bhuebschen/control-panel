@@ -35,6 +35,11 @@ internal sealed class SnapInPickerDialog : Form
 
         foreach (var info in snapIns)
         {
+            if (!info.Standalone)
+            {
+                continue;
+            }
+
             var item = new ListViewItem(info.Name) { Tag = info };
             item.SubItems.Add(info.Provider ?? string.Empty);
             item.SubItems.Add(info.Version ?? string.Empty);

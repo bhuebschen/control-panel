@@ -143,6 +143,12 @@ internal static class SnapInDiagnostics
             Line("Calling SnapInSession.Load()...");
             var session = SnapInSession.Load(match, console);
             Line("SnapInSession.Load() returned successfully.");
+            Line("Expanding the static root node...");
+            session.ExpandNode(console, session.RootNode);
+            Line("Static root expansion returned successfully.");
+            Line("Creating and showing the result view...");
+            session.ShowResults(console, session.RootNode);
+            Line("Result view initialization returned successfully.");
             Line($"Root scope nodes created: {consoleRoot.Nodes.Count}");
             foreach (TreeNode node in consoleRoot.Nodes)
             {
@@ -151,7 +157,7 @@ internal static class SnapInDiagnostics
 
             try
             {
-                session.ComponentData.Destroy();
+                session.Destroy();
             }
             catch (Exception cleanupEx)
             {

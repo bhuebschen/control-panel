@@ -22,9 +22,22 @@ internal sealed class SnapInSession
     public required IComponentData ComponentData { get; init; }
     public IComponent Component { get; private set; } = null!;
 
+    private bool _componentCreated;
+    private bool _componentDataInitialized;
+    private bool _destroyed;
+
+    public ScopeNode RootNode { get; private set; } = null!;
+
     public static SnapInSession Load(SnapInInfo info, MmcConsole console)
     {
         CheckBitnessCompatibility(info);
+
+        if (!info.Standalone)
+        {
+            throw new NotSupportedException(
+                $"'{info.Name}' is registered as an extension snap-in. Extension snap-ins require a primary " +
+                "snap-in node whose node type they extend; they cannot be inserted as a standalone root.");
+        }
 
         var type = Type.GetTypeFromCLSID(info.Clsid, throwOnError: true)!;
         var comObject = Activator.CreateInstance(type)
@@ -41,60 +54,34 @@ internal sealed class SnapInSession
             ComponentData = componentData,
         };
 
-        console.RunWithSession(session, () =>
+        try
         {
-            componentData.Initialize(console);
-            componentData.CreateComponent(out object componentObj);
-            var component = (IComponent)componentObj;
-            session.Component = component;
+            console.RunWithSession(session, () =>
+            {
+                session._componentDataInitialized = true;
+                componentData.Initialize(console);
 
-            // Unlike IComponentData.Initialize (same object+MarshalAs(IUnknown)
-            // shape, called two lines above, works fine here), calling
-            // IComponent.Initialize through the declarative [ComImport]
-            // interface throws InvalidOperationException ("Operation is not
-            // valid due to the current state of the object") for "Services"
-            // and "Component Services" specifically - confirmed via
-            // FirstChanceException logging to be the true throw site, not a
-            // rethrow of some other failure, and confirmed via live
-            // debugging that the snap-in's native Initialize does get
-            // entered (it calls back into SetHeader/QueryScopeImageList
-            // before this surfaces). Bypassing coreclr's own interop stub
-            // for just this one call - identical technique already proven
-            // for QueryScopeImageList/QueryResultImageList/QueryConsoleVerb -
-            // avoids whatever internal state check the declarative stub is
-            // failing here.
-            RawInitializeComponent(component, console);
+                // MMC itself inserts a standalone snap-in's static node.
+                // Cookie zero identifies that node. The snap-in only inserts
+                // its enumerated children later in response to MMCN_EXPAND.
+                session.RootNode = console.InsertStaticNode(session, info.Name);
+            });
 
-            // Ask the primary snap-in to insert its static root node(s)
-            // (parent handle 0 == our synthetic "Console Root").
-            //
-            // Tried reordering this before CreateComponent/IComponent.Initialize
-            // (matching a hypothesis that real mmc.exe defers IComponent
-            // creation until a result view is needed) - it did not fix
-            // "Component Services" (identical E_INVALIDARG) and made
-            // "Services" fail earlier/differently (E_UNEXPECTED here instead
-            // of E_NOINTERFACE at IComponent.Initialize), so call order
-            // relative to IComponent is not the cause. Reverted to this order,
-            // which is what "Folder"/"ActiveX Control" were validated against.
-            //
-            // The declarative [ComImport] Notify call throws ArgumentException
-            // ("Value does not fall within the expected range") for
-            // "Services"/"Component Services" even with a null data object -
-            // confirmed via FirstChanceException logging to be the true throw
-            // site, not a rethrow. Bypassed via the same raw-vtable technique.
-            // TEMPORARY (live-debugging "Component Services"): forcing NULL
-            // again to step through comsnap.dll's null-data-object branch,
-            // which disassembly showed is a distinct code path (probably the
-            // real "populate my own static root" special case) from the one
-            // a real data object takes (which does nothing useful). Revert
-            // to the QueryDataObject-based lookup above once this is understood.
-            IDataObject? rootDataObject = null;
-            RawNotify(componentData, rootDataObject, MMC_NOTIFY_TYPE.MMCN_EXPAND, new IntPtr(1), IntPtr.Zero);
+            return session;
+        }
+        catch
+        {
+            try
+            {
+                session.Destroy();
+            }
+            catch
+            {
+                // Preserve the original load failure.
+            }
 
-            SendAddImages(console, session);
-        });
-
-        return session;
+            throw;
+        }
     }
 
     [UnmanagedFunctionPointer(CallingConvention.StdCall)]
@@ -227,6 +214,88 @@ internal sealed class SnapInSession
         }
     }
 
+    private void EnsureComponent(MmcConsole console)
+    {
+        if (_componentCreated)
+        {
+            return;
+        }
+
+        console.RunWithSession(this, () =>
+        {
+            ComponentData.CreateComponent(out object componentObject);
+            var component = (IComponent)componentObject;
+            Component = component;
+
+            try
+            {
+                RawInitializeComponent(component, console);
+                _componentCreated = true;
+                SendAddImages(console, this);
+            }
+            catch
+            {
+                try
+                {
+                    component.Destroy(IntPtr.Zero);
+                }
+                catch
+                {
+                    // Preserve the initialization exception.
+                }
+
+                _componentCreated = false;
+                Component = null!;
+                throw;
+            }
+        });
+    }
+
+    public void Destroy()
+    {
+        if (_destroyed)
+        {
+            return;
+        }
+
+        _destroyed = true;
+        Exception? firstFailure = null;
+
+        if (_componentCreated)
+        {
+            try
+            {
+                Component.Destroy(IntPtr.Zero);
+            }
+            catch (Exception ex)
+            {
+                firstFailure = ex;
+            }
+
+            _componentCreated = false;
+            Component = null!;
+        }
+
+        if (_componentDataInitialized)
+        {
+            try
+            {
+                ComponentData.Destroy();
+            }
+            catch (Exception ex)
+            {
+                firstFailure ??= ex;
+            }
+
+            _componentDataInitialized = false;
+        }
+
+        if (firstFailure is not null)
+        {
+            throw firstFailure;
+        }
+    }
+
     /// <summary>
     /// An in-process (InprocServer32) COM DLL must match the host process's
     /// bitness - a 32-bit-only snap-in cannot load into a 64-bit host, or
@@ -284,13 +353,31 @@ internal sealed class SnapInSession
         }
 
         RemovePlaceholder(console, node);
-        node.ChildrenLoaded = true;
 
-        console.RunWithSession(this, () =>
+        try
         {
-            var dataObject = TryGetScopeDataObject(node);
-            Component.Notify(dataObject, MMC_NOTIFY_TYPE.MMCN_EXPAND, new IntPtr(1), node.Handle);
-        });
+            console.RunWithSession(this, () =>
+            {
+                var dataObject = TryGetScopeDataObject(node);
+                RawNotify(
+                    ComponentData,
+                    dataObject,
+                    MMC_NOTIFY_TYPE.MMCN_EXPAND,
+                    new IntPtr(1),
+                    node.Handle);
+            });
+
+            node.ChildrenLoaded = true;
+        }
+        catch
+        {
+            if (node.UiNode is { Nodes.Count: 0 })
+            {
+                node.UiNode.Nodes.Add(new TreeNode("..."));
+            }
+
+            throw;
+        }
     }
 
     private static void RemovePlaceholder(MmcConsole console, ScopeNode node)
@@ -304,6 +391,8 @@ internal sealed class SnapInSession
 
     public void ShowResults(MmcConsole console, ScopeNode node)
     {
+        EnsureComponent(console);
+
         // Verb state belongs to "whatever is selected right now", not to a
         // snap-in or node persistently - reset it before handing the new
         // selection to the snap-in, so a verb the *previous* selection (in
@@ -313,19 +402,24 @@ internal sealed class SnapInSession
         console.RunWithSession(this, () =>
         {
             var dataObject = TryGetScopeDataObject(node);
-            Component.Notify(dataObject, MMC_NOTIFY_TYPE.MMCN_SELECT, MakeSelectArg(scope: true, select: true), IntPtr.Zero);
-            Component.Notify(dataObject, MMC_NOTIFY_TYPE.MMCN_SHOW, new IntPtr(1), node.Handle);
+            RawNotify(Component, dataObject, MMC_NOTIFY_TYPE.MMCN_SELECT, MakeSelectArg(scope: true, select: true), IntPtr.Zero);
+            RawNotify(Component, dataObject, MMC_NOTIFY_TYPE.MMCN_SHOW, new IntPtr(1), node.Handle);
         });
         node.ResultsLoaded = true;
     }
 
     public void HideResults(MmcConsole console, ScopeNode node)
     {
+        if (!_componentCreated)
+        {
+            return;
+        }
+
         console.RunWithSession(this, () =>
         {
             var dataObject = TryGetScopeDataObject(node);
-            Component.Notify(dataObject, MMC_NOTIFY_TYPE.MMCN_SELECT, MakeSelectArg(scope: true, select: false), IntPtr.Zero);
-            Component.Notify(null, MMC_NOTIFY_TYPE.MMCN_SHOW, IntPtr.Zero, node.Handle);
+            RawNotify(Component, dataObject, MMC_NOTIFY_TYPE.MMCN_SELECT, MakeSelectArg(scope: true, select: false), IntPtr.Zero);
+            RawNotify(Component, dataObject, MMC_NOTIFY_TYPE.MMCN_SHOW, IntPtr.Zero, node.Handle);
         });
     }
 
@@ -339,6 +433,11 @@ internal sealed class SnapInSession
     /// </summary>
     public void NotifyResultSelect(MmcConsole console, ResultRow row, bool selected)
     {
+        if (!_componentCreated)
+        {
+            return;
+        }
+
         if (selected)
         {
             // Same reasoning as in ShowResults: a newly-selected row starts
@@ -350,7 +449,7 @@ internal sealed class SnapInSession
         console.RunWithSession(this, () =>
         {
             var dataObject = TryGetResultDataObject(row);
-            Component.Notify(dataObject, MMC_NOTIFY_TYPE.MMCN_SELECT, MakeSelectArg(scope: false, select: selected), IntPtr.Zero);
+            RawNotify(Component, dataObject, MMC_NOTIFY_TYPE.MMCN_SELECT, MakeSelectArg(scope: false, select: selected), IntPtr.Zero);
         });
     }
 
@@ -376,6 +475,11 @@ internal sealed class SnapInSession
 
     public IDataObject? TryGetResultDataObject(ResultRow row)
     {
+        if (!_componentCreated)
+        {
+            return null;
+        }
+
         try
         {
             Component.QueryDataObject(row.Cookie, DATA_OBJECT_TYPES.CCT_RESULT, out var dataObject);

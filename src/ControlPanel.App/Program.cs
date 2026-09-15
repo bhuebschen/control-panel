@@ -13,6 +13,11 @@ internal static class Program
 
         if (args.Length >= 1 && args[0] == "--diag-load-snapin")
         {
+            if (args.Length < 2)
+            {
+                throw new ArgumentException("Usage: --diag-load-snapin <name-or-clsid> [output-file]");
+            }
+
             SnapInDiagnostics.RunLoadDiagnostic(args[1], args.Length > 2 ? args[2] : null);
             return;
         }

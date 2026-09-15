@@ -15,126 +15,25 @@ about the parts that haven't been exercised yet.
 
 ## Verified against real snap-ins
 
-Using the headless diagnostic (`ControlPanel.App.exe --diag-load-snapin
-"<name or {CLSID}>" [output-file]`, see `Native/SnapInDiagnostics.cs`) to
-run the full `CoCreateInstance` &rarr; `IComponentData.Initialize` &rarr;
-`CreateComponent` &rarr; `IComponent.Initialize` &rarr; `MMCN_EXPAND`
-sequence non-interactively against every snap-in registered on a real
-Windows 11 machine:
+Live Windows 11 debugging has verified the low-level COM mechanism against
+real snap-ins. In particular, the host now passes a correctly typed
+`IConsole*` to `IComponent::Initialize`, returns its CCW-backed interfaces
+through explicit interface pointers, and treats `S_FALSE` as a successful
+HRESULT.
 
-- **Fully successful, end-to-end, with real root scope nodes inserted:**
-  the "Folder" and "ActiveX Control" snap-ins (`{C96401CC-...}` /
-  `{C96401CF-...}`).
-- **Fails for reasons unrelated to this host's interop code** (confirmed
-  by testing raw COM calls that bypass this project's C# interface
-  declarations entirely): "Classic Event Viewer" - its own `Initialize`
-  genuinely returns `E_NOINTERFACE`, most likely because (per its own
-  registration name) it's an extension snap-in, never meant to be loaded
-  standalone.
-- **Real bugs found and fixed this way, in order:** an `InvalidCastException`
-  from `IComponent.Initialize(IConsole lpConsole)` (fixed: `object` +
-  `MarshalAs(IUnknown)`, see "Known limitations"); after that, an
-  `InvalidOperationException`/`NullReferenceException` (different exception
-  types for different snap-ins, same underlying cause) thrown by .NET's own
-  interop marshaler - not this project's code, not the snap-in's - when
-  returning this host's own `IImageList`/`IConsoleVerb` objects through
-  `out object` parameters marshaled as `MarshalAs(Interface)`; fixed by
-  dropping to a raw `out IntPtr` and calling
-  `Marshal.GetComInterfaceForObject` explicitly instead of relying on the
-  high-level marshaler for that direction.
-- **The `InvalidOperationException`/`0x80131509` mystery, solved:** live
-  mixed-mode (managed + native) debugging in Visual Studio traced the
-  exception to its real native call stack, which turned out to be nothing
-  more exotic than the standard CLR exception-raise sequence
-  (`RaiseException` &rarr; SEH dispatch &rarr; debugger-notification wait)
-  - a red herring caused by a debugger being attached, not evidence of a
-  hang or a deep runtime invariant violation. Reading `$exception.Message`
-  directly at the throw point (rather than continuing to read native call
-  stacks) gave the real message: `"Operation is not valid due to the
-  current state of the object."`, thrown by .NET's own interop stub for
-  `IComponent.Initialize`, immediately after this host's `IConsole` object
-  is marshaled as the `lpConsole` argument via
-  `[MarshalAs(UnmanagedType.IUnknown)]`. The real cause: **mmc.idl types
-  this parameter as `LPCONSOLE` (i.e. `IConsole*`), not `IUnknown*`.**
-  Marshaling it as a bare `IUnknown` pointer only happens to work for
-  snap-ins that `QueryInterface` the pointer themselves before using it
-  ("Folder", "ActiveX Control"); "Services" and "Component Services"
-  instead reinterpret the incoming pointer directly as an `IConsole`
-  vtable, per the IDL contract, and something about a mismatched
-  `IUnknown`-shaped pointer there is what .NET's own marshaler was
-  rejecting. Fixed by bypassing the declarative `[ComImport]` call for
-  `IComponent.Initialize` entirely - a raw vtable call
-  (`QueryInterface` + manual vtable slot read + `GetDelegateForFunctionPointer`)
-  using `Marshal.GetComInterfaceForObject(console, typeof(IConsole))` for a
-  correctly-typed pointer instead. `IComponentData.Notify` needed the
-  identical raw-vtable bypass for the same reason. See
-  `SnapInSession.RawInitializeComponent`/`RawNotify`.
-- **"Component Services" now progresses past `Initialize` and `Notify`
-  entirely** and fails later, at a *genuine* native `E_INVALIDARG`
-  (confirmed via the raw vtable call - no more interop-layer ambiguity)
-  from a further `Notify` call - a real, narrower, still-open question
-  about the exact `arg`/`param`/`lpDataObject` values a stricter,
-  Microsoft-authored snap-in expects for a given notification, not a bug
-  in this project's marshaling.
-- **Regression caught and fixed during this same investigation:** the raw
-  vtable calls above check the returned HRESULT manually (they bypass
-  `[ComImport]`, so nothing else checks it) - the first version treated any
-  non-zero result as failure, which broke "Folder" and "ActiveX Control"
-  (previously fully working) the moment `Notify` legitimately returned
-  `S_FALSE` (`0x00000001`, a real success code some snap-ins use, not an
-  error). Fixed by checking the HRESULT sign bit (`result < 0`) like
-  `Marshal.ThrowExceptionForHR` does internally.
-- **"Component Services" now loads fully successfully**, end-to-end, no
-  exceptions. Two more real bugs found and fixed to get there: (1) the
-  root `MMCN_EXPAND` notification to `IComponentData::Notify` was being
-  sent with `lpDataObject = NULL`, which this snap-in rejects with
-  `E_INVALIDARG` - real mmc.exe instead first calls
-  `IComponentData::QueryDataObject(0, CCT_SCOPE, ...)` to obtain a real
-  data object for the root and passes *that*; "Folder"/"ActiveX Control"
-  happened to tolerate `NULL` there, "Component Services" does not. (2)
-  The exact same declarative-`[ComImport]`-stub bug already fixed for
-  `IComponentData.Notify`/`IComponent.Initialize` also affects
-  `IComponent.Notify` (used for the `MMCN_ADD_IMAGES` notification in
-  `SendAddImages`) - fixed with the same raw-vtable bypass. (Zero root
-  scope nodes is the correct, expected outcome for this snap-in, not a
-  remaining bug - "Folder" also legitimately reports zero.)
-- **"Disk Management" also now loads successfully** (also zero root scope
-  nodes - an extension-style snap-in that talks to a separate Virtual Disk
-  Service process for its actual content, not something this host drives).
-- **"Services" still has a separate, unresolved bug**: its
-  `IComponent::Initialize` genuinely returns `E_NOINTERFACE` (confirmed via
-  the raw vtable call), after successfully completing reentrant
-  `QueryScopeImageList`/`SetHeader`/`QueryConsoleVerb` calls into this host
-  - meaning it (or something it calls into) does a `QueryInterface` this
-  host doesn't answer, immediately after `QueryConsoleVerb`, with nothing
-  further ever calling back into this host's traced methods. Checked and
-  ruled out via targeted self-checks or by adding the interface and
-  retesting: `IControlbar`/`IToolbar`, `IPropertySheetProvider` (discovered
-  missing entirely during this investigation and added - real GUID
-  `85DE64DE-EF21-11cf-A285-00C04FD8DBE6`, verified against the actual
-  Windows SDK header rather than from memory, since it differs from
-  `IExtendPropertySheet`'s GUID only in one byte), and `IColumnData`
-  (also discovered missing and added - GUID `547C1354-024D-11d3-A707-
-  00C04F8EF4CB`). None of these are ever queried for before the failure,
-  so whatever interface (or non-interop internal operation, e.g. something
-  Service-Control-Manager-related that has nothing to do with this host's
-  console implementation at all) "Services" needs immediately after
-  `QueryConsoleVerb` remains unidentified. Reordering
-  `CreateComponent`/`IComponent.Initialize` relative to the root
-  `MMCN_EXPAND` notification (tried while investigating "Component
-  Services" above) does not affect this failure either. Live mixed-mode
-  debugging (as used to crack the original `0x80131509` mystery) - setting
-  a breakpoint right after `QueryConsoleVerb` and stepping into the native
-  disassembly to see the actual next `QueryInterface`'s requested IID -
-  is the most promising next step, since automated candidate-interface
-  guessing has stopped converging.
+The latest lifecycle correction is awaiting another Windows run: MMC, not
+the snap-in, inserts a standalone snap-in's static scope node. The host now
+creates that node with cookie zero, delays `CreateComponent` until the node's
+result view is shown, and sends `MMCN_EXPAND` to `IComponentData` with the
+static node's real `HSCOPEITEM`. Earlier statements that a snap-in had loaded
+"end-to-end" while producing zero root nodes were based on the old, incorrect
+lifecycle and are intentionally no longer treated as verification.
 
-The two full successes prove the core mechanism - real snap-in DLL,
-loaded by CLSID, driven through this host's own `IConsole`/
-`IConsoleNameSpace2`/`IImageList` implementation with no mmc.exe involved
-- genuinely works end-to-end. The remaining failures are a mix of "not
-this host's fault" (confirmed) and "real, only partially understood
-interop behavior" (flagged honestly above rather than papered over).
+The diagnostic command (`ControlPanel.App.exe --diag-load-snapin "<name or
+{CLSID}>" [output-file]`) now exercises all three phases explicitly: static
+node creation, scope expansion, and result-view initialization. Extension
+snap-ins are rejected as standalone roots until NodeType-based attachment to
+a compatible primary node is implemented.
 
 ## Why this exists / how it's built
 

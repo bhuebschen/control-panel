@@ -47,7 +47,11 @@ internal static class SnapInRegistry
             var provider = providerRaw is null ? null : (ResolveIndirectString(providerRaw) ?? providerRaw);
 
             var version = key.GetValue("Version") as string;
-            var standalone = key.GetValue("Standalone") is not null;
+            // MMC registration uses Standalone as a subkey. Accepting the
+            // legacy/value form too costs nothing and keeps third-party
+            // registrations that used it defensively compatible.
+            using var standaloneKey = key.OpenSubKey("Standalone");
+            var standalone = standaloneKey is not null || key.GetValue("Standalone") is not null;
 
             Guid? aboutClsid = null;
             if (key.GetValue("About") is string aboutString && Guid.TryParse(aboutString.Trim('{', '}'), out var ac))

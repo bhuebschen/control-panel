@@ -81,6 +81,43 @@ internal sealed class MmcConsole : IConsole2, IConsoleNameSpace2, IHeaderCtrl2, 
 
     public IReadOnlyList<ResultRow> ResultRows => _resultRows;
 
+    /// <summary>
+    /// Inserts the static root node owned by a standalone snap-in. MMC's
+    /// console creates this node itself; the snap-in only inserts enumerated
+    /// children beneath it when it receives MMCN_EXPAND.
+    /// </summary>
+    public ScopeNode InsertStaticNode(SnapInSession session, string displayName)
+    {
+        var handle = new IntPtr(_nextScopeHandle++);
+        var node = new ScopeNode
+        {
+            Handle = handle,
+            ParentHandle = IntPtr.Zero,
+            Cookie = IntPtr.Zero,
+            Session = session,
+            DisplayName = displayName,
+            HasChildren = true,
+        };
+
+        var uiNode = new TreeNode(displayName)
+        {
+            ImageIndex = -1,
+            SelectedImageIndex = -1,
+        };
+        node.UiNode = uiNode;
+
+        // Until the first MMCN_EXPAND completes we must expose an expansion
+        // glyph. ExpandNode removes this placeholder before the snap-in adds
+        // its real children.
+        uiNode.Nodes.Add(new TreeNode("..."));
+        _consoleRoot.Nodes.Add(uiNode);
+        _scopeNodesByHandle[handle] = node;
+        _scopeNodesByUiNode[uiNode] = node;
+
+        SnapInDiagnostics.Trace($"Inserted static node '{displayName}' as HSCOPEITEM 0x{handle:X}");
+        return node;
+    }
+
     // ------------------------------------------------------------------
     // IConsole / IConsole2
     // ------------------------------------------------------------------

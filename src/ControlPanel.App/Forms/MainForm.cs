@@ -191,7 +191,7 @@ internal sealed class MainForm : Form
         var session = _sessions.FirstOrDefault(s => s == node.Session);
         try
         {
-            session?.ComponentData.Destroy();
+            session?.Destroy();
         }
         catch
         {
@@ -396,7 +396,7 @@ internal sealed class MainForm : Form
         {
             try
             {
-                session.ComponentData.Destroy();
+                session.Destroy();
             }
             catch
             {
