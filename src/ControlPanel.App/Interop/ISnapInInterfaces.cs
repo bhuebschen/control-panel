@@ -22,12 +22,19 @@ internal interface IComponentData
 {
     void Initialize([MarshalAs(UnmanagedType.IUnknown)] object pUnknown);
     void CreateComponent(out IComponent ppComponent);
-    void Notify(IDataObject? lpDataObject, MMC_NOTIFY_TYPE @event, IntPtr arg, IntPtr param);
+    // lpDataObject is typed as a plain object (not the IDataObject interface
+    // type) marshaled explicitly as an interface pointer, matching the
+    // pattern already proven to work for Initialize's pUnknown above -
+    // Notify is the first call in the whole session that passes a
+    // COM-interface-typed argument (as opposed to a plain object) and,
+    // with null, an interface-typed parameter here crashed inside coreclr's
+    // own interop marshaling rather than in the snap-in's code.
+    void Notify([MarshalAs(UnmanagedType.Interface)] object? lpDataObject, MMC_NOTIFY_TYPE @event, IntPtr arg, IntPtr param);
     void Destroy();
     void QueryDataObject(IntPtr cookie, DATA_OBJECT_TYPES type, out IDataObject ppDataObject);
     void GetDisplayInfo(ref SCOPEDATAITEM pScopeDataItem);
     [PreserveSig]
-    int CompareObjects(IDataObject lpDataObjectA, IDataObject lpDataObjectB);
+    int CompareObjects([MarshalAs(UnmanagedType.Interface)] object lpDataObjectA, [MarshalAs(UnmanagedType.Interface)] object lpDataObjectB);
 }
 
 [ComImport]
@@ -36,13 +43,13 @@ internal interface IComponentData
 internal interface IComponent
 {
     void Initialize(IConsole lpConsole);
-    void Notify(IDataObject? lpDataObject, MMC_NOTIFY_TYPE @event, IntPtr arg, IntPtr param);
+    void Notify([MarshalAs(UnmanagedType.Interface)] object? lpDataObject, MMC_NOTIFY_TYPE @event, IntPtr arg, IntPtr param);
     void Destroy(IntPtr cookie);
     void QueryDataObject(IntPtr cookie, DATA_OBJECT_TYPES type, out IDataObject ppDataObject);
     void GetResultViewType(IntPtr cookie, out IntPtr ppViewType, out int pViewOptions);
     void GetDisplayInfo(ref RESULTDATAITEM pResultDataItem);
     [PreserveSig]
-    int CompareObjects(IDataObject lpDataObjectA, IDataObject lpDataObjectB);
+    int CompareObjects([MarshalAs(UnmanagedType.Interface)] object lpDataObjectA, [MarshalAs(UnmanagedType.Interface)] object lpDataObjectB);
 }
 
 [ComImport]
@@ -50,9 +57,9 @@ internal interface IComponent
 [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
 internal interface IExtendPropertySheet
 {
-    void CreatePropertyPages(IPropertySheetCallback lpProvider, IntPtr handle, IDataObject lpIDataObject);
+    void CreatePropertyPages(IPropertySheetCallback lpProvider, IntPtr handle, [MarshalAs(UnmanagedType.Interface)] object lpIDataObject);
     [PreserveSig]
-    int QueryPagesFor(IDataObject lpDataObject);
+    int QueryPagesFor([MarshalAs(UnmanagedType.Interface)] object lpDataObject);
 }
 
 [ComImport]
@@ -60,8 +67,8 @@ internal interface IExtendPropertySheet
 [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
 internal interface IExtendContextMenu
 {
-    void AddMenuItems(IDataObject piDataObject, IContextMenuCallback piCallback, ref int pInsertionAllowed);
-    void Command(int lCommandID, IDataObject piDataObject);
+    void AddMenuItems([MarshalAs(UnmanagedType.Interface)] object piDataObject, IContextMenuCallback piCallback, ref int pInsertionAllowed);
+    void Command(int lCommandID, [MarshalAs(UnmanagedType.Interface)] object piDataObject);
 }
 
 [ComImport]
