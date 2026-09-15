@@ -192,6 +192,42 @@ internal interface IContextMenuCallback
     void AddItem(ref CONTEXTMENUITEM pItem);
 }
 
+internal enum MMC_CONTROL_TYPE
+{
+    TOOLBAR,
+    MENUBUTTON,
+    COMBOBOXBAR,
+}
+
+// A snap-in obtains these via a direct QueryInterface on the IConsole
+// pointer it was handed (there is no dedicated "QueryControlbar" method on
+// IConsole) - experiment: snap-ins with substantial toolbars (Services,
+// Component Services) may probe for this early and fail their own
+// Initialize when it's unsupported, since this host never implemented it
+// (E_NOINTERFACE) while real mmc.exe always provides one.
+[ComImport]
+[Guid("69FB811E-6C1C-11D0-A2CB-00C04FD909DD")]
+[InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+internal interface IControlbar
+{
+    void Create(MMC_CONTROL_TYPE nType, IntPtr pExtendControlbar, out IntPtr ppUnknown);
+    void Attach(MMC_CONTROL_TYPE nType, IntPtr lpUnknown);
+    void Detach(IntPtr lpUnknown);
+}
+
+[ComImport]
+[Guid("43136EB9-D36C-11CF-ADBC-00AA00A80033")]
+[InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+internal interface IToolbar
+{
+    void AddBitmap(int nImages, IntPtr hbmp, int cxSize, int cySize, int crMask);
+    void AddButtons(int nButtons, IntPtr lpButtons);
+    void InsertButton(int nIndex, IntPtr lpButton);
+    void DeleteButton(int nIndex);
+    void GetButtonState(int idCommand, int nState, [MarshalAs(UnmanagedType.Bool)] out bool pState);
+    void SetButtonState(int idCommand, int nState, [MarshalAs(UnmanagedType.Bool)] bool bState);
+}
+
 [ComImport]
 [Guid("E49F7A60-74AF-11D0-A286-00C04FD8FE93")]
 [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]

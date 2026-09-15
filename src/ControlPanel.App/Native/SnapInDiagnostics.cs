@@ -21,12 +21,16 @@ internal static class SnapInDiagnostics
     public static void RunLoadDiagnostic(string nameOrClsid, string? outputPath)
     {
         outputPath ??= Path.Combine(Path.GetTempPath(), "controlpanel-diag.txt");
-        var log = new StringBuilder();
+        File.WriteAllText(outputPath, string.Empty);
 
         void Line(string text)
         {
-            log.AppendLine(text);
             Console.WriteLine(text);
+            // Appended immediately (not buffered until a `finally` block),
+            // so a hard, unrecoverable failure (Internal CLR error,
+            // AccessViolationException) that kills the process outright
+            // still leaves a complete log on disk up to the last call made.
+            File.AppendAllText(outputPath, text + Environment.NewLine);
         }
 
         // Reentrant native->managed callbacks lose their original managed
@@ -110,7 +114,6 @@ internal static class SnapInDiagnostics
         finally
         {
             AppDomain.CurrentDomain.FirstChanceException -= firstChance;
-            File.WriteAllText(outputPath, log.ToString());
             Console.WriteLine($"(full log written to {outputPath})");
         }
     }

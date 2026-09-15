@@ -19,7 +19,7 @@ namespace ControlPanel.App.Hosting;
 [ComVisible(true)]
 [ClassInterface(ClassInterfaceType.None)]
 [ComDefaultInterface(typeof(IConsole2))]
-internal sealed class MmcConsole : IConsole2, IConsoleNameSpace2, IHeaderCtrl2, IResultData, IDisplayHelp, IConsoleVerb
+internal sealed class MmcConsole : IConsole2, IConsoleNameSpace2, IHeaderCtrl2, IResultData, IDisplayHelp, IConsoleVerb, IControlbar, IToolbar
 {
     private readonly TreeView _tree;
     private readonly ListView _list;
@@ -765,6 +765,57 @@ internal sealed class MmcConsole : IConsole2, IConsoleNameSpace2, IHeaderCtrl2, 
     {
         _verbState.Clear();
         _defaultVerb = MMC_CONSOLE_VERB.MMC_VERB_PROPERTIES;
+    }
+
+    // ------------------------------------------------------------------
+    // IControlbar / IToolbar
+    //
+    // Obtained by a snap-in via a direct QueryInterface on the IConsole
+    // pointer (no dedicated Query method exists for this on IConsole
+    // itself), for snap-ins that add their own toolbar buttons. Not
+    // wired to any real UI in this host - these are no-op stubs purely so
+    // that snap-ins expecting *some* controlbar to exist don't get
+    // E_NOINTERFACE and potentially abort their own Initialize over it.
+    // ------------------------------------------------------------------
+
+    public void Create(MMC_CONTROL_TYPE nType, IntPtr pExtendControlbar, out IntPtr ppUnknown)
+    {
+        ppUnknown = nType == MMC_CONTROL_TYPE.TOOLBAR
+            ? Marshal.GetComInterfaceForObject(this, typeof(IToolbar))
+            : IntPtr.Zero;
+    }
+
+    public void Attach(MMC_CONTROL_TYPE nType, IntPtr lpUnknown)
+    {
+    }
+
+    public void Detach(IntPtr lpUnknown)
+    {
+    }
+
+    public void AddBitmap(int nImages, IntPtr hbmp, int cxSize, int cySize, int crMask)
+    {
+    }
+
+    public void AddButtons(int nButtons, IntPtr lpButtons)
+    {
+    }
+
+    public void InsertButton(int nIndex, IntPtr lpButton)
+    {
+    }
+
+    public void DeleteButton(int nIndex)
+    {
+    }
+
+    public void GetButtonState(int idCommand, int nState, out bool pState)
+    {
+        pState = true;
+    }
+
+    public void SetButtonState(int idCommand, int nState, bool bState)
+    {
     }
 
     // ------------------------------------------------------------------

@@ -45,17 +45,35 @@ Windows 11 machine:
 - **Progress, not yet fully resolved:** "Services" and "Component Services"
   both now get further than before each fix - reaching real reentrant
   calls into this host's `IConsole`/`IImageList` (`QueryScopeImageList`,
-  `SetHeader`) that complete successfully - but still ultimately fail
-  with a generic `InvalidOperationException` when their own
-  `IComponent::Initialize` call returns. This persisted across every
-  marshaling variant tried so far and across running elevated, and two
-  independent ReactOS MMC reimplementation attempts
-  (`base/applications/mmc` and the more complete `mmc_new`) turned out not
-  to help - the relevant methods there are unfinished `__debugbreak()`
-  stubs or code disabled with `#if 0`, never actually exercised against a
-  real snap-in either. Root cause not yet found; "Local Users and Groups"
-  hits a related but more severe "Internal CLR error" (unrecoverable) at
-  the same general point, which would need native debugging to go further.
+  `SetHeader`) that complete successfully, with nothing further calling
+  back into this host afterward (confirmed via a durable, append-per-line
+  diagnostic log immune to losing data on a hard crash) - but still
+  ultimately fail with a generic `InvalidOperationException` when their
+  own `IComponent::Initialize` call returns. Ruled out so far, all with no
+  effect on the outcome: every marshaling variant tried, running elevated,
+  calling `CoInitializeSecurity` (in case mmc.exe configures DCOM security
+  in a way this host's default COM initialization doesn't), adding
+  `IControlbar`/`IToolbar` stubs (in case a missing controlbar makes a
+  snap-in with real toolbar buttons abort its own `Initialize`), and
+  renaming the host executable to `mmc.exe` (in case a snap-in checks its
+  own host process's name). The failing HRESULT
+  (`0x80131509` = `COR_E_INVALIDOPERATION`, the CLR's own code, confirmed
+  by calling `Initialize` through a raw vtable pointer that bypasses this
+  project's C# declarations entirely and still getting it back) is real,
+  managed-runtime-flavored evidence that *something* about hosting these
+  two specific snap-ins outside mmc.exe trips a .NET interop invariant
+  this project hasn't identified yet - and real mmc.exe on the exact same
+  machine opens both without issue, which rules out an environment/service
+  problem. Two independent ReactOS MMC reimplementation attempts
+  (`base/applications/mmc` and the more complete `mmc_new`) were checked
+  for a reference and turned out not to help - the relevant methods there
+  are unfinished `__debugbreak()` stubs or code disabled with `#if 0`,
+  never actually exercised against a real snap-in either. "Local Users and
+  Groups" hits a related but more severe "Internal CLR error"
+  (unrecoverable) at the same general point. Root cause not yet found;
+  genuinely getting further here likely needs native (mixed-mode)
+  debugging to see what these snap-ins' own code does after the last
+  callback into this host returns, which wasn't available this session.
 
 The two full successes prove the core mechanism - real snap-in DLL,
 loaded by CLSID, driven through this host's own `IConsole`/
