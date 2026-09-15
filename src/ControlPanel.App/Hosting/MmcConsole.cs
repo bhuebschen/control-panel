@@ -238,6 +238,19 @@ internal sealed class MmcConsole : IConsole2, IConsoleNameSpace2, IHeaderCtrl2, 
     /// </summary>
     public bool HasUnresolvedCustomView => _customViewRequestedForCurrentNode && CustomResultViewObject is null;
 
+    /// <summary>
+    /// True whenever a custom view was requested for the node currently
+    /// being shown, regardless of whether a real CustomResultViewObject
+    /// exists for it. SnapInSession.ShowResults uses this (not just
+    /// HasUnresolvedCustomView) to decide whether to send MMCN_SHOW:
+    /// confirmed via live testing that sending it crashes the process
+    /// even when GenericAxHost creation *succeeded* - "Component
+    /// Services"' own MMCN_SHOW handler apparently expects a private
+    /// interface on the object QueryResultView hands back that a generic
+    /// AxHost wrapper doesn't provide, not just "some object or other".
+    /// </summary>
+    public bool CustomViewRequestedForCurrentNode => _customViewRequestedForCurrentNode;
+
     public void QueryResultView(out object pUnknown)
     {
         SnapInDiagnostics.Trace(nameof(QueryResultView));

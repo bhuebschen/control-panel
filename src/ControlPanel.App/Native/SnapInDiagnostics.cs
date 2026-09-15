@@ -48,6 +48,25 @@ internal static class SnapInDiagnostics
         }
     }
 
+    /// <summary>
+    /// Turns on the same durable Trace() logging for a normal interactive
+    /// MainForm run, gated behind an env var so it stays off by default -
+    /// used to diagnose a crash reachable only through real UI interaction
+    /// (e.g. a custom AxHost result view), which --diag-load-snapin's
+    /// headless path can't drive at all.
+    /// </summary>
+    public static void EnableInteractiveTracingIfRequested()
+    {
+        var path = Environment.GetEnvironmentVariable("CONTROLPANEL_TRACE");
+        if (string.IsNullOrWhiteSpace(path))
+        {
+            return;
+        }
+
+        File.WriteAllText(path, string.Empty);
+        _tracePath = path;
+    }
+
     public static void RunLoadDiagnostic(string nameOrClsid, string? outputPath)
     {
         outputPath ??= Path.Combine(Path.GetTempPath(), "controlpanel-diag.txt");

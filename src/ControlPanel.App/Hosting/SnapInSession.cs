@@ -510,27 +510,27 @@ internal sealed class SnapInSession
             // This is part of MMC's scope-selection protocol, not an
             // optional query.  Besides choosing standard/custom view, some
             // native snap-ins use it to establish the per-node view state
-            // consumed by their following MMCN_SHOW handler.
+            // consumed by their following MMCN_SHOW handler. Also creates
+            // (or tears down) the real GenericAxHost for a custom view, via
+            // MmcConsole.NotifyResultViewType - see its own comment.
             EnsureResultView(console, node);
 
-            if (console.HasUnresolvedCustomView)
+            if (console.CustomViewRequestedForCurrentNode)
             {
                 // Confirmed via live testing against "Component Services":
-                // sending MMCN_SHOW to a snap-in that just asked for a
-                // custom result view it isn't actually getting crashes the
-                // whole process (an unrecoverable AccessViolationException
-                // deep in the snap-in's own native code, not anything this
-                // host's own marshaling does) - the snap-in's MMCN_SHOW
-                // handler for a custom view apparently needs real in-place-
-                // activation window state this host either didn't have a
-                // chance to create yet (no MainForm, e.g. the headless
-                // --diag-load-snapin path) or failed to create, and it
-                // doesn't fail gracefully without it. Failing cleanly here
-                // beats a hard crash, and matches this host's existing,
-                // honest "no custom OCX/web result views" scope boundary.
-                throw new NotSupportedException(
-                    $"'{Info.Name}' requested a custom MMC result view for '{node.DisplayName}' " +
-                    "that could not be created in this context.");
+                // creating and in-place-activating its custom ActiveX result
+                // view (just above, via GenericAxHost) succeeds - it's
+                // specifically sending it MMCN_SHOW that crashes the whole
+                // process, inside the snap-in's own handler once it calls
+                // back into QueryResultView and starts driving the object
+                // that comes back - apparently expecting a private,
+                // undocumented interface on it a generic AxHost wrapper
+                // doesn't provide. Skip only this notification pair (not
+                // the view creation above): the real custom view stays
+                // visible, just not driven through MMC's own notification
+                // protocol, which is the safest point found so far short of
+                // reverse-engineering that private interface.
+                return;
             }
 
             // MMCN_SHOW(TRUE) is the notification that tells the snap-in to
@@ -586,7 +586,13 @@ internal sealed class SnapInSession
 
         // Tells MainForm to swap the ListView for a GenericAxHost bound to
         // this CLSID (or back to the ListView, for null/empty) - see
-        // MmcConsole.ResultViewTypeChanged/CustomResultViewObject.
+        // MmcConsole.ResultViewTypeChanged/CustomResultViewObject. Creating
+        // and in-place-activating the ActiveX control this way is confirmed
+        // working live (SnapInDiagnostics trace: GenericAxHost construction,
+        // CreateControl(), and GetOcxWrapper() all completed and returned a
+        // real object, for this exact snap-in/CLSID) - it's specifically
+        // sending MMCN_SHOW afterward that isn't safe yet (see ShowResults),
+        // not creating the view itself.
         console.NotifyResultViewType(hr == E_NOTIMPL || string.IsNullOrWhiteSpace(viewType) ? null : viewType);
     }
 

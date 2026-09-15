@@ -26,6 +26,8 @@ internal static class Program
             return;
         }
 
+        SnapInDiagnostics.EnableInteractiveTracingIfRequested();
+
         ApplicationConfiguration.Initialize();
         Application.Run(new MainForm());
     }

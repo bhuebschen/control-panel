@@ -256,15 +256,20 @@ internal sealed class MainForm : Form
 
         try
         {
+            SnapInDiagnostics.Trace($"OnResultViewTypeChanged: constructing GenericAxHost('{viewType}')");
             var host = new GenericAxHost(viewType) { Dock = DockStyle.Fill };
+            SnapInDiagnostics.Trace("OnResultViewTypeChanged: GenericAxHost constructed, adding to panel");
             _resultPanel.Controls.Add(host);
             // Forces the underlying ActiveX object to actually be created
             // now (AxHost otherwise defers this until the control's window
             // handle is created some other way), so GetOcxWrapper() below
             // has something real to return.
+            SnapInDiagnostics.Trace("OnResultViewTypeChanged: calling host.CreateControl()");
             host.CreateControl();
+            SnapInDiagnostics.Trace("OnResultViewTypeChanged: CreateControl() returned, calling GetOcxWrapper()");
             _customResultHost = host;
             _console.CustomResultViewObject = host.GetOcxWrapper();
+            SnapInDiagnostics.Trace("OnResultViewTypeChanged: GetOcxWrapper() returned successfully");
         }
         catch (Exception ex)
         {
@@ -300,19 +305,42 @@ internal sealed class MainForm : Form
 
         _console.DeleteAllRsltItems();
         _list.Columns.Clear();
-
-        // Real mmc.exe apparently populates a node's children as soon as it
-        // is selected, not only when the user visually clicks its +/-
-        // glyph - confirmed via "Performance Monitor" crashing in
-        // WdcResourceMonitorNode::OnShow when a node's children were never
-        // enumerated yet (its result view assumes they already exist), and
-        // not crashing once they'd already been expanded first. ExpandNode
-        // is a safe no-op for a node with no children or already loaded.
-        node.Session.ExpandNode(_console, node);
-
         _currentNode = node;
-        node.Session.ShowResults(_console, node);
-        _statusLabel.Text = node.DisplayName;
+
+        try
+        {
+            // Real mmc.exe apparently populates a node's children as soon as
+            // it is selected, not only when the user visually clicks its
+            // +/- glyph - confirmed via "Performance Monitor" crashing in
+            // WdcResourceMonitorNode::OnShow when a node's children were
+            // never enumerated yet (its result view assumes they already
+            // exist), and not crashing once they'd already been expanded
+            // first. ExpandNode is a safe no-op for a node with no children
+            // or already loaded.
+            node.Session.ExpandNode(_console, node);
+            node.Session.ShowResults(_console, node);
+            _statusLabel.Text = node.DisplayName;
+        }
+        catch (Exception ex)
+        {
+            // Selecting a node is not a user action with an undo, so a
+            // scope-boundary failure here (e.g. a custom MMC result view
+            // this host doesn't support - see SnapInSession.EnsureResultView)
+            // must not reach WinForms' default unhandled-exception dialog:
+            // that offers "Continue"/"Quit" like an actual crash, even
+            // though the process is perfectly fine and every *other* node
+            // still works. Show it as the same kind of contained error
+            // AddSnapIn already uses instead.
+            Diagnostics.Log($"ShowResults failed for '{node.DisplayName}' ({node.Session.Info.Name}): {ex}");
+            MessageBox.Show(
+                this,
+                $"Could not show '{node.DisplayName}':\n{ex.Message}",
+                "MMC Snap-in Host",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Warning);
+            _statusLabel.Text = $"{node.DisplayName} (failed to load)";
+        }
+
         UpdateVerbBasedUiState();
     }
 
