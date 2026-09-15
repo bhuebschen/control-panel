@@ -1,5 +1,9 @@
 using System.Runtime.InteropServices;
-using System.Runtime.InteropServices.ComTypes;
+// The WinForms SDK project style implicitly adds "using System.Windows.Forms;"
+// to every file, and System.Windows.Forms.IDataObject (drag/drop, clipboard)
+// collides with the COM IDataObject this file actually means - alias it
+// explicitly rather than relying on the ComTypes using winning by chance.
+using IDataObject = System.Runtime.InteropServices.ComTypes.IDataObject;
 
 namespace ControlPanel.App.Interop;
 

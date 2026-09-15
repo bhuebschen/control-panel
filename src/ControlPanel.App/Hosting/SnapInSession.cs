@@ -1,5 +1,8 @@
 using System.Runtime.InteropServices;
-using System.Runtime.InteropServices.ComTypes;
+// See ISnapInInterfaces.cs: the WinForms SDK project style implicitly
+// pulls in System.Windows.Forms.IDataObject everywhere, which collides
+// with the COM one this file means.
+using IDataObject = System.Runtime.InteropServices.ComTypes.IDataObject;
 using ControlPanel.App.Interop;
 using ControlPanel.App.Native;
 using Microsoft.Win32;

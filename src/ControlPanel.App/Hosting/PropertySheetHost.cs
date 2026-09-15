@@ -1,5 +1,8 @@
 using System.Runtime.InteropServices;
-using System.Runtime.InteropServices.ComTypes;
+// See ISnapInInterfaces.cs: System.Windows.Forms.IDataObject (used for
+// drag/drop and clipboard, and in scope here via the using below) collides
+// with the COM IDataObject this file actually means.
+using IDataObject = System.Runtime.InteropServices.ComTypes.IDataObject;
 using System.Windows.Forms;
 using ControlPanel.App.Interop;
 using ControlPanel.App.Native;
