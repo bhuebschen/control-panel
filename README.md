@@ -37,31 +37,34 @@ WinForms UI:
   get their own static root node with legitimately zero children - these
   are generic container/demo snap-ins with no inherent content of their
   own, not a bug.
-- **Custom OCX result views ("Component Services", "Disk Management") are
-  partially supported: the real ActiveX control is created and shown, but
-  not populated.** `IComponent.GetResultViewType` reports a custom
-  result-view CLSID (`{410381DB-...}` / `{AEB84C83-...}` respectively) for
-  these snap-ins, since they render their result pane as a custom OCX/tree
-  control rather than the standard list view. `Hosting/GenericAxHost.cs`
-  (an `AxHost` subclass bound to an arbitrary runtime CLSID) hosts that
-  control directly: confirmed via live testing that constructing it,
-  `CreateControl()`, and `GetOcxWrapper()` all succeed and return a real,
-  live COM object, and `MainForm` swaps it in for the `ListView` when a
-  node reports one. What isn't safe yet is handing that object back to the
-  snap-in: sending `MMCN_SHOW` afterward (the notification that would tell
-  it to actually populate the view) crashes the whole process once the
-  snap-in calls back into `QueryResultView` and starts driving the object
-  it gets - "Component Services" almost certainly expects a private,
-  undocumented interface on it that a generic `AxHost` wrapper can't
-  provide. `SnapInSession.ShowResults` (via
-  `MmcConsole.CustomViewRequestedForCurrentNode`) skips exactly that one
-  notification and nothing else, so the view is created and visible - just
-  blank, since the population step that needed skipping is what would have
-  filled it in. Making it actually show content would mean reverse-
-  engineering that private interface, which is a real follow-up, not
-  something this host does today. "Classic Event Viewer" is correctly
-  rejected up front as an extension-only snap-in (`Standalone` registry
-  check) instead of being force-loaded as standalone and failing with a
+- **Custom OCX result views ("Component Services", "Disk Management") now
+  work, including real content - the fix was deferring one notification by
+  a message-pump cycle, not skipping it.** `IComponent.GetResultViewType`
+  reports a custom result-view CLSID (`{410381DB-...}` / `{AEB84C83-...}`
+  respectively) for these snap-ins, since they render their result pane as
+  a custom OCX/tree control rather than the standard list view.
+  `Hosting/GenericAxHost.cs` (an `AxHost` subclass bound to an arbitrary
+  runtime CLSID) hosts that control directly. Sending the snap-in
+  `MMCN_SHOW` immediately afterward, in the same synchronous call chain as
+  `CreateControl()`, crashed the whole process - `AxHost.CreateControl()`
+  already drives the control through OLE's `InPlaceActive` state
+  synchronously, but the snap-in's own `MMCN_SHOW` handler apparently still
+  needs a full WinForms message-pump cycle to settle before it's safe to
+  reach it. Fixed by posting the `MMCN_SHOW`/`MMCN_SELECT` pair via
+  `Control.BeginInvoke` (`MmcConsole.PostToUiThread`) instead of sending it
+  synchronously - confirmed via live testing that "Disk Management" now
+  shows its real UI with no crash, including a real, correctly-rendered
+  error message ("the connection to the Virtual Disk service could not be
+  established") when not running elevated, matching real mmc.exe's own
+  behavior exactly. The deferred call is guarded against the node having
+  changed again before it runs (`MmcConsole.CustomResultViewObject`
+  identity check) and against a non-fatal exception reaching WinForms'
+  default unhandled-exception dialog - it is not, and cannot be, guarded
+  against a repeat `AccessViolationException` if some other custom-view
+  snap-in hits a differently-shaped version of this same timing issue.
+  "Classic Event Viewer" is correctly rejected up front as an
+  extension-only snap-in (`Standalone` registry check) instead of being
+  force-loaded as standalone and failing with a
   confusing native `E_NOINTERFACE`.
 - **The `E_NOINTERFACE` at `IComponent::Initialize` for "Services" and
   "Shared Folders" - found and fixed:** both are implemented by the exact
@@ -427,10 +430,9 @@ point, not a finished, drop-in mmc.exe replacement:
   supported. Consoles that are themselves just a shell around extensions
   (e.g. Computer Management) won't be useful here; single-purpose
   standalone snap-ins are the realistic target.
-- **No taskpads, no toolbars/controlbars.** Custom OCX result views are
-  partially supported (the control is created and shown) - see "Verified
-  against real snap-ins" above for exactly what still doesn't work
-  (population, i.e. actual content).
+- **No taskpads, no toolbars/controlbars.** Custom OCX result views
+  ("Component Services", "Disk Management") do now work, including real
+  content - see "Verified against real snap-ins" above.
 - **No .msc save/load, no persistence** - snap-ins are added per-session via
   the picker, and nothing is passed to a snap-in to tell it *what* to
   target. Several well-known snap-ins need exactly that at add-time -

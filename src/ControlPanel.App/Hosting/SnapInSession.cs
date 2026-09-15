@@ -519,17 +519,48 @@ internal sealed class SnapInSession
             {
                 // Confirmed via live testing against "Component Services":
                 // creating and in-place-activating its custom ActiveX result
-                // view (just above, via GenericAxHost) succeeds - it's
-                // specifically sending it MMCN_SHOW that crashes the whole
-                // process, inside the snap-in's own handler once it calls
-                // back into QueryResultView and starts driving the object
-                // that comes back - apparently expecting a private,
-                // undocumented interface on it a generic AxHost wrapper
-                // doesn't provide. Skip only this notification pair (not
-                // the view creation above): the real custom view stays
-                // visible, just not driven through MMC's own notification
-                // protocol, which is the safest point found so far short of
-                // reverse-engineering that private interface.
+                // view (just above, via GenericAxHost) succeeds; sending it
+                // MMCN_SHOW *synchronously, in the same call chain* crashes
+                // the whole process once the snap-in calls back into
+                // QueryResultView and starts driving the object it gets.
+                //
+                // Untested hypothesis, worth one careful try: AxHost's
+                // CreateControl() drives the control to InPlaceActive
+                // synchronously, but the snap-in's own MMCN_SHOW handler may
+                // still need a full WinForms message-pump cycle to finish
+                // settling (paint, further OLE activation bookkeeping) before
+                // it's safe to reach it - deferring the send via
+                // MmcConsole.PostToUiThread (Control.BeginInvoke) tests that
+                // without giving up the "don't crash" guarantee if it's
+                // wrong: guarded against the view having already changed by
+                // the time this runs, and against a non-fatal exception
+                // reaching WinForms' default unhandled-exception dialog. It
+                // is NOT, and cannot be, guarded against a repeat
+                // AccessViolationException - that still takes the whole
+                // process down immediately if this hypothesis turns out
+                // wrong, same as sending synchronously would.
+                var expectedViewObject = console.CustomResultViewObject;
+                var deferredDataObject = dataObject;
+                console.PostToUiThread(() =>
+                {
+                    if (!ReferenceEquals(console.CustomResultViewObject, expectedViewObject))
+                    {
+                        return; // Navigated elsewhere before this ran.
+                    }
+
+                    try
+                    {
+                        console.RunWithSession(this, () =>
+                        {
+                            RawNotify(Component, deferredDataObject, MMC_NOTIFY_TYPE.MMCN_SHOW, new IntPtr(1), node.Handle);
+                            RawNotify(Component, deferredDataObject, MMC_NOTIFY_TYPE.MMCN_SELECT, MakeSelectArg(scope: true, select: true), IntPtr.Zero);
+                        });
+                    }
+                    catch (Exception ex)
+                    {
+                        Diagnostics.Log($"Deferred MMCN_SHOW for custom view ('{Info.Name}'/'{node.DisplayName}') failed: {ex}");
+                    }
+                });
                 return;
             }
 

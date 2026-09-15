@@ -124,6 +124,16 @@ internal sealed class MmcConsole : IConsole2, IConsoleNameSpace2, IHeaderCtrl2, 
         RunWithSession<object?>(session, () => { action(); return null; });
     }
 
+    /// <summary>
+    /// Posts a callback onto the WinForms UI thread's own message queue
+    /// (Control.BeginInvoke), for the theory that a custom AxHost view
+    /// needs a full message-pump cycle after CreateControl() before it's
+    /// safe to send MMCN_SHOW - untested until SnapInSession.ShowResults
+    /// actually uses this, guarded so a repeat crash is easy to isolate
+    /// and revert.
+    /// </summary>
+    public void PostToUiThread(Action action) => _ownerForm.BeginInvoke(action);
+
     public IReadOnlyDictionary<TreeNode, ScopeNode> NodesByUiNode => _scopeNodesByUiNode;
 
     public IReadOnlyList<ResultRow> ResultRows => _resultRows;
