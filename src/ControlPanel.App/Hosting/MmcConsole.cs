@@ -354,27 +354,28 @@ internal sealed class MmcConsole : IConsole2, IConsoleNameSpace2, IHeaderCtrl2, 
         if (displayNamePtr == MmcConsts.MMC_CALLBACK)
         {
             var resolved = resolveViaCallback();
-            return CoTaskMemToString(resolved) ?? string.Empty;
+            return BorrowedStringToManaged(resolved) ?? string.Empty;
         }
 
         return Marshal.PtrToStringUni(displayNamePtr) ?? string.Empty;
     }
 
-    private static string? CoTaskMemToString(IntPtr ptr)
+    /// <summary>
+    /// Copies a string returned through IComponentData::GetDisplayInfo or
+    /// IComponent::GetDisplayInfo.  The pointer is borrowed: mmc.idl keeps
+    /// ownership with the snap-in, which may retain that allocation until
+    /// the next GetDisplayInfo call for the item, item deletion, or
+    /// IComponent[Data]::Destroy.  Freeing it here corrupts the snap-in's
+    /// allocator and eventually terminates the process in ntdll.
+    /// </summary>
+    private static string? BorrowedStringToManaged(IntPtr ptr)
     {
         if (ptr == IntPtr.Zero)
         {
             return null;
         }
 
-        try
-        {
-            return Marshal.PtrToStringUni(ptr);
-        }
-        finally
-        {
-            Marshal.FreeCoTaskMem(ptr);
-        }
+        return Marshal.PtrToStringUni(ptr);
     }
 
     // NOTE: IConsoleNameSpace.DeleteItem(IntPtr,int) and IResultData.DeleteItem(IntPtr,int)
@@ -968,7 +969,7 @@ internal sealed class MmcConsole : IConsole2, IConsoleNameSpace2, IHeaderCtrl2, 
 
         RunWithSession(row.Session, () => row.Session.Component.GetDisplayInfo(ref item));
 
-        var text = CoTaskMemToString(item.str) ?? string.Empty;
+        var text = BorrowedStringToManaged(item.str) ?? string.Empty;
         row.ColumnCache[column] = text;
         return text;
     }
