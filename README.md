@@ -103,12 +103,26 @@ via `Control.Enter`, since a focus check alone breaks for keyboard/menu
 use and doesn't fall back sensibly when the result pane is active but
 empty); and `IConsoleVerb` state was a single dictionary that was never
 reset between selections, so a verb one snap-in disabled could stay
-disabled after switching to a completely unrelated node or snap-in. These
-are the kind of defects that only show up by reading the spec very
-literally or by running against a real snap-in - and this project has had
-plenty of the former, zero of the latter. Assume
-more exist and treat this as a serious-but-unverified starting point, not
-a finished, drop-in mmc.exe replacement:
+disabled after switching to a completely unrelated node or snap-in.
+
+The first bug actually caught by *running* the host (rather than review)
+was an `AccessViolationException` in `ImageListAdapter`: despite mmc.idl
+typing `ImageListSetIcon`/`ImageListSetStrip`'s handle parameters as
+`LONG_PTR*` ("pointer to a pointer-sized value"), real snap-ins pass the
+HICON/HBITMAP handle *value itself*, reinterpret-cast to that pointer
+type (`ImageListSetIcon((LONG_PTR*)hIcon, nLoc)`), not the address of a
+variable holding it. Dereferencing that "pointer" (`Marshal.ReadIntPtr`)
+read whatever memory address happened to numerically match the handle
+value - not a valid pointer - and crashed the process outright, the one
+kind of bug in this codebase category that a try/catch cannot contain
+(`AccessViolationException` is a corrupted-state exception the CLR won't
+let ordinary code catch). This is exactly the class of defect that only
+running against a real snap-in reveals - the parameter *type* was right
+and reviewed as such; its documented real-world calling convention was
+not what the type name implied.
+
+Assume more exist and treat this as a serious-but-unverified starting
+point, not a finished, drop-in mmc.exe replacement:
 
 - **No extension snap-ins** (`IExtendContextMenu`, `IExtendControlbar`,
   dynamic `AddExtension`) - only *standalone* (primary) snap-ins are

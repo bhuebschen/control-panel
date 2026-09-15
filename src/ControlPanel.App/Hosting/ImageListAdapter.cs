@@ -25,46 +25,42 @@ internal sealed class ImageListAdapter : IImageList
 
     public void ImageListSetIcon(IntPtr pIcon, int nLoc)
     {
+        // Despite the "LONG_PTR*" typing in the IDL, real snap-ins pass the
+        // HICON value itself reinterpret-cast to that pointer type (e.g.
+        // "ImageListSetIcon((LONG_PTR*)hIcon, nLoc)"), not the address of a
+        // variable holding it - confirmed against the Microsoft Learn
+        // parameter docs and matching sample code, and the hard way, via an
+        // AccessViolationException from treating it as a real indirection.
         if (pIcon == IntPtr.Zero)
-        {
-            return;
-        }
-
-        IntPtr hIcon = Marshal.ReadIntPtr(pIcon);
-        if (hIcon == IntPtr.Zero)
         {
             return;
         }
 
         try
         {
-            using var icon = Icon.FromHandle(hIcon);
+            using var icon = Icon.FromHandle(pIcon);
             SetImage(nLoc, icon.ToBitmap());
         }
         finally
         {
-            Win32.DestroyIcon(hIcon);
+            Win32.DestroyIcon(pIcon);
         }
     }
 
     public void ImageListSetStrip(IntPtr pBMapSm, IntPtr pBMapLg, int nStartLoc, int cMask)
     {
         // We only maintain a single (small, 16x16-class) image list, so the
-        // large-icon strip is intentionally ignored here.
+        // large-icon strip is intentionally ignored here. As with
+        // ImageListSetIcon, pBMapSm/pBMapLg are HBITMAP values themselves,
+        // not addresses of variables holding them.
         if (pBMapSm == IntPtr.Zero)
-        {
-            return;
-        }
-
-        IntPtr hbmSmall = Marshal.ReadIntPtr(pBMapSm);
-        if (hbmSmall == IntPtr.Zero)
         {
             return;
         }
 
         try
         {
-            using var stripBitmap = Image.FromHbitmap(hbmSmall);
+            using var stripBitmap = Image.FromHbitmap(pBMapSm);
             int cellWidth = _target.ImageSize.Width;
             int cellHeight = _target.ImageSize.Height;
             int count = stripBitmap.Width / Math.Max(cellWidth, 1);
@@ -88,14 +84,10 @@ internal sealed class ImageListAdapter : IImageList
         }
         finally
         {
-            Win32.DeleteObject(hbmSmall);
+            Win32.DeleteObject(pBMapSm);
             if (pBMapLg != IntPtr.Zero)
             {
-                IntPtr hbmLarge = Marshal.ReadIntPtr(pBMapLg);
-                if (hbmLarge != IntPtr.Zero)
-                {
-                    Win32.DeleteObject(hbmLarge);
-                }
+                Win32.DeleteObject(pBMapLg);
             }
         }
     }
