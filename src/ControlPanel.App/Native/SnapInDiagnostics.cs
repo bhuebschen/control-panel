@@ -1,4 +1,5 @@
 using System.Drawing;
+using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Windows.Forms;
@@ -150,9 +151,101 @@ internal static class SnapInDiagnostics
             session.ShowResults(console, session.RootNode);
             Line("Result view initialization returned successfully.");
             Line($"Root scope nodes created: {consoleRoot.Nodes.Count}");
+
+            // Recursively expands every scope node (not just the root),
+            // to reproduce/report structural issues at any depth - e.g. a
+            // child that inserts no items of its own, or one that ends up
+            // attached under the wrong parent (ParentHandle mismatch).
+            void DumpAndExpand(TreeNode uiNode, int depth)
+            {
+                if (depth > 8)
+                {
+                    Line($"{new string(' ', depth * 2)}... (depth limit reached, stopping)");
+                    return;
+                }
+
+                var indent = new string(' ', depth * 2);
+                console.NodesByUiNode.TryGetValue(uiNode, out var scopeNode);
+                string extra = scopeNode is null
+                    ? " (not a tracked scope node)"
+                    : $" [handle=0x{scopeNode.Handle:X}, parent=0x{scopeNode.ParentHandle:X}, cookie=0x{scopeNode.Cookie:X}, hasChildren={scopeNode.HasChildren}]";
+                Line($"{indent}- '{uiNode.Text}'{extra}");
+
+                if (scopeNode is not null && scopeNode.HasChildren && !scopeNode.ChildrenLoaded)
+                {
+                    try
+                    {
+                        session.ExpandNode(console, scopeNode);
+                    }
+                    catch (Exception ex)
+                    {
+                        Line($"{indent}  (expand FAILED: {ex.GetType().Name}: {ex.Message})");
+                    }
+                }
+
+                // Also show the result pane for this node - a snap-in commonly
+                // has real result rows on a node it reports zero *scope*
+                // children for (e.g. a leaf like "Benutzer"/"Users").
+                if (scopeNode is not null)
+                {
+                    try
+                    {
+                        scopeNode.Session.ShowResults(console, scopeNode);
+                        Line($"{indent}  (result rows: {console.ResultRows.Count})");
+                        int shown = 0;
+                        foreach (var row in console.ResultRows)
+                        {
+                            if (shown++ >= 5)
+                            {
+                                Line($"{indent}    ... ({console.ResultRows.Count - 5} more)");
+                                break;
+                            }
+                            var col0 = console.GetResultColumnText(row, 0);
+                            Line($"{indent}    row itemID=0x{row.ItemId:X} cookie=0x{row.Cookie:X} col0='{col0}'");
+
+                            if (shown == 1)
+                            {
+                                var rowDataObject = row.Session.TryGetResultDataObject(row);
+                                if (rowDataObject is null)
+                                {
+                                    Line($"{indent}      Properties: no data object available for this row");
+                                }
+                                else
+                                {
+                                    bool found = PropertySheetHost.TryFindPages(
+                                        rowDataObject,
+                                        new object?[] { row.Session.Component, row.Session.ComponentData },
+                                        out var pages);
+                                    Line($"{indent}      Properties: found={found}, pages={pages.Count}: [{string.Join(", ", pages.Select(p => $"0x{p:X}"))}]");
+                                    foreach (var page in pages)
+                                    {
+                                        Line($"{indent}      Destroying page 0x{page:X}...");
+                                        Win32.DestroyPropertySheetPage(page);
+                                        Line($"{indent}      Destroyed page 0x{page:X} OK");
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        Line($"{indent}  (ShowResults FAILED: {ex.GetType().Name}: {ex.Message})");
+                    }
+                }
+
+                foreach (TreeNode child in uiNode.Nodes)
+                {
+                    if (child.Text == "...")
+                    {
+                        continue;
+                    }
+                    DumpAndExpand(child, depth + 1);
+                }
+            }
+
             foreach (TreeNode node in consoleRoot.Nodes)
             {
-                Line($"  - '{node.Text}' (children: {node.Nodes.Count})");
+                DumpAndExpand(node, 1);
             }
 
             try

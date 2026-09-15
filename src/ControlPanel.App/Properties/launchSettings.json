@@ -2,7 +2,6 @@
   "profiles": {
     "ControlPanel.App": {
       "commandName": "Project",
-      "commandLineArgs": "--diag-load-snapin \"Component Services\"",
       "debugEngines": "managed,native"
     }
   }

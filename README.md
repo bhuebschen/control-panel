@@ -15,25 +15,215 @@ about the parts that haven't been exercised yet.
 
 ## Verified against real snap-ins
 
-Live Windows 11 debugging has verified the low-level COM mechanism against
-real snap-ins. In particular, the host now passes a correctly typed
-`IConsole*` to `IComponent::Initialize`, returns its CCW-backed interfaces
-through explicit interface pointers, and treats `S_FALSE` as a successful
-HRESULT.
+The static-root lifecycle correction described below has now been run
+against a real Windows 11 machine via the diagnostic command
+(`ControlPanel.App.exe --diag-load-snapin "<name or {CLSID}>"`, which now
+exercises all three phases: static node creation, scope expansion, and
+result-view initialization) and, for several of these, through the actual
+WinForms UI:
 
-The latest lifecycle correction is awaiting another Windows run: MMC, not
-the snap-in, inserts a standalone snap-in's static scope node. The host now
-creates that node with cookie zero, delays `CreateComponent` until the node's
-result view is shown, and sends `MMCN_EXPAND` to `IComponentData` with the
-static node's real `HSCOPEITEM`. Earlier statements that a snap-in had loaded
-"end-to-end" while producing zero root nodes were based on the old, incorrect
-lifecycle and are intentionally no longer treated as verification.
+- **Full success, real content:** "Local Users and Groups" (1 static root
+  node with 2 real children - "Users", "Groups" - previously this snap-in
+  hit an unrecoverable "Internal CLR error", traced to this host freeing a
+  string pointer it didn't own, see below); "Print Management" (1 static
+  root node with 3 real children - "Custom Filters", "Print Servers",
+  "Deployed Printers" - the first genuinely complex, multi-level system
+  snap-in confirmed working end-to-end); **"Services"** (273 real, distinct
+  services listed with correct names/columns - previously blocked first by
+  a missing `IImageList` implementation, then by an unrecoverable crash in
+  a legacy MFC dependency, both found and fixed, see below); **"Shared
+  Folders"** (same underlying DLL and fixes as "Services").
+- **Correct, expected empty content:** "Folder" and "ActiveX Control" each
+  get their own static root node with legitimately zero children - these
+  are generic container/demo snap-ins with no inherent content of their
+  own, not a bug.
+- **Correctly identified as out of scope, with a clear message instead of a
+  cryptic failure:** "Component Services" and "Disk Management" both now
+  fail cleanly with `IComponent.GetResultViewType` reporting a custom
+  result-view CLSID (`{410381DB-...}` / `{AEB84C83-...}` respectively) -
+  these snap-ins render their result pane as a custom OCX/tree control, not
+  the standard list view this host implements; this is a real, honest
+  scope boundary (see "No taskpads, no custom OCX/web result views" below),
+  not an interop bug. "Classic Event Viewer" is now correctly rejected
+  up front as an extension-only snap-in (`Standalone` registry check)
+  instead of being force-loaded as standalone and failing with a
+  confusing native `E_NOINTERFACE`.
+- **The `E_NOINTERFACE` at `IComponent::Initialize` for "Services" and
+  "Shared Folders" - found and fixed:** both are implemented by the exact
+  same DLL (`filemgmt.dll`), which explained why they failed identically.
+  Live debugging straight into `CComponent::Initialize`'s disassembly
+  showed it calling `QueryInterface(IID_IImageList)` directly on the
+  console object itself (separately from - and in addition to - the
+  `QueryScopeImageList`/`QueryResultImageList` methods on `IConsole`,
+  which return their *own* dedicated `IImageList` objects) - real mmc.exe's
+  console object apparently answers this directly too, but `MmcConsole`
+  never implemented `IImageList` itself. Fixed by having `MmcConsole`
+  implement `IImageList` too (delegating to the scope image list).
+- **A new, deeper problem surfaced immediately after that fix, for the
+  same two snap-ins - and it turned out to be unfixable from outside the
+  process:** with `Initialize` now succeeding, both crash the whole
+  process with an unrecoverable `AccessViolationException` shortly after,
+  reading from address `0x0`. Live native debugging traced it to
+  `mfc42u.dll!CCmdTarget::BeginWaitCursor`, called from
+  `filemgmt.dll!CWaitCursor::CWaitCursor` while the snap-in populates its
+  result list - `filemgmt.dll` is a **legacy MFC (Microsoft Foundation
+  Classes) extension DLL** from the Visual C++ 6 / MFC 4.2 era, and
+  `BeginWaitCursor` dereferences the process's `CWinApp` instance (via
+  `AfxGetApp()`), which is `NULL` because this host never creates one - it
+  is a plain WinForms/.NET application, not an MFC one, and real mmc.exe
+  apparently has (or provides) one. A native "shim" DLL that constructs a
+  minimal `CWinApp` was considered, but investigated and ruled out: (1) no
+  MFC component is installed with this machine's Visual Studio toolchain,
+  and (2) even if it were, it would be the wrong, ABI-incompatible modern
+  MFC (14.x) - `AfxGetApp`/`AfxWinInit`/`AfxGetModuleState` are `inline`
+  functions compiled directly into *each calling module* in classic MFC,
+  reading that module's own private, unexported state, confirmed absent
+  from both `mfc42u.dll`'s real export table (`dumpbin /EXPORTS`, only 8 of
+  6884 exports are named at all) and Ghidra's independently-curated
+  `mfc42u.dll` ordinal database - there is no stable, external way to
+  construct a real, ABI-compatible `CWinApp` for `filemgmt.dll` to find.
+- **Solved anyway, with a different technique: both "Services" and "Shared
+  Folders" now load fully, with real content** (273 real services listed
+  for "Services", correct column data throughout). Since a real `CWinApp`
+  can't be constructed externally, `Native/MfcCompatibilityShim.cs`
+  installs a Windows **Vectored Exception Handler** (a standard, documented
+  OS mechanism, set up once via `AddVectoredExceptionHandler` before any
+  snap-in loads) that traps this *exact* crash - an access violation
+  reading address `0x0`, with the `this`-pointer register (`RCX`) also
+  `0`, at an instruction confirmed (via `VirtualQuery`) to live inside
+  `mfc42u.dll` itself - and redirects `RCX` to a fake "app object" whose
+  entire (large) vtable points at a single real, exported,
+  Control-Flow-Guard-valid function (`kernel32!GetCurrentThreadId`, chosen
+  specifically because CFG's indirect-call check requires a genuinely
+  address-taken target - an arbitrary `VirtualAlloc`'d "ret stub" would
+  itself be a fatal, uncatchable CFG violation instead). Execution resumes
+  at the exact same faulting instruction, now succeeds, and the eventual
+  indirect call reaches the harmless stand-in function instead of crashing;
+  since this call site is purely wait-cursor bookkeeping whose result
+  nothing downstream consults, the net effect is just "no wait cursor
+  shown," not corrupted state. This is a narrow, first-cut heuristic for
+  the one exact crash shape found so far (this specific register, this
+  specific module, a read of exactly address zero) - a differently-shaped
+  null-`CWinApp` crash elsewhere would not match and would still be fatal;
+  broadening the heuristic (or adding more matched shapes) is
+  straightforward if that happens with another MFC-based snap-in.
+- **Icons from one loaded snap-in changing - and the wrong new icons then
+  showing up in an already-loaded, different snap-in - the moment a second
+  snap-in is added:** every snap-in shares this host's one `MmcConsole`
+  (and therefore its one scope/result `ImageList` each) for the process's
+  whole lifetime, but each snap-in numbers its own icons from `0` via
+  `IImageList::ImageListSetIcon`/`SetStrip`, with no idea any other
+  snap-in shares the list - a second snap-in's icon `0` silently overwrote
+  the first snap-in's icon already sitting at that same shared index.
+  Fixed by giving each `SnapInSession` its own reserved, non-overlapping
+  block of indices in each shared list (`SnapInSession.ScopeImageBase`/
+  `ResultImageBase`, allocated by `MmcConsole.AllocateImageBases`) -
+  `ImageListAdapter` adds the calling session's base before writing into
+  the real, shared list, and `MmcConsole.OffsetImageIndex` adds it again
+  wherever a `ScopeNode`/`ResultRow`'s own (still snap-in-raw) `ImageIndex`
+  is used to set an actual `TreeNode`/`ListViewItem`'s image index. Not
+  reproducible by the single-snap-in `--diag-load-snapin` diagnostic -
+  needs at least two snap-ins loaded in the same running instance to
+  exercise the shared list at all.
+- **This shim is incompatible with an attached debugger.** With Visual
+  Studio attached, even with the Win32 "Access Violation" exception
+  setting unchecked (so VS itself doesn't break on it), loading "Services"
+  or "Shared Folders" crashes with an unhandled
+  `System.ExecutionEngineException` instead of recovering - worse than the
+  original crash, since it signals the CLR considers its own internal
+  state corrupted. A debugger sits *between* the OS and the process's own
+  exception chain (first-chance exceptions go to the debug port before
+  reaching the process's vectored handlers at all), and resuming execution
+  mid-fault via `EXCEPTION_CONTINUE_EXECUTION` through that extra layer
+  appears to desynchronize CoreCLR's own internal exception bookkeeping in
+  a way it does not tolerate. Confirmed to work cleanly with no debugger
+  attached at all (every `--diag-load-snapin` test run in this section was
+  run that way) - **load "Services"/"Shared Folders" only via Ctrl+F5
+  ("Start Without Debugging") or by running the built .exe directly**,
+  never under an attached debugger.
+- **The shim's first version caused intermittent native heap corruption
+  (`STATUS_HEAP_CORRUPTION` / `0xC0000374`, seen via Windows Error
+  Reporting) when actually opening and closing a Properties dialog for
+  "Services"/"Local Users and Groups"** - worse than the crash it was
+  meant to fix, since heap corruption can surface anywhere, later,
+  unpredictably. Cause: the fake "app object" was only 8 bytes (just
+  enough to hold its own vtable pointer) - fine for the one-off virtual
+  call the wait-cursor crash needed, but a real property page (itself
+  backed by the same MFC-based DLL) goes further and can read *or write*
+  `CWinApp` member fields directly at other offsets from `this`, not just
+  dispatch through the vtable - any write past 8 bytes corrupted whatever
+  heap memory happened to follow it. Fixed by making the dummy object a
+  full 4KB, zero-initialized, and pre-filled with the same vtable pointer
+  at every 8-byte offset (covering the case where some other offset is
+  itself read as a secondary vtable pointer, which C++ multiple
+  inheritance - which `CWinApp` uses - can produce).
+- **Every result-pane row showing the exact same text - found by "Local
+  Users and Groups" listing 5 "users" that all read "Lokale Benutzer und
+  Gruppen (lokal)" (the snap-in's own root description) instead of their
+  actual account names:** live debugging into `localsec.dll!Component
+  ::GetDisplayInfo` showed it reads the row's identity from
+  `RESULTDATAITEM.lParam` (via `ComponentData::GetInstanceFromCookie`), not
+  from `itemID` as this host had assumed - `GetResultColumnText` never set
+  `RDI_PARAM`/`lParam` on its request, so `lParam` stayed zero for every
+  row, and cookie zero conventionally means "the root item" - explaining
+  why every row resolved to the same (root) description. Fixed by resupplying
+  `RDI_PARAM` and the row's own `Cookie` (already captured at insert time)
+  on every `GetDisplayInfo` request. A declarative-`[ComImport]`-marshaling
+  bug for this same call was also independently found and fixed along the
+  way (a `ref struct` parameter's input fields weren't reliably reaching
+  the native call) - bypassed with the same raw-vtable-plus-manual-struct-
+  marshaling technique used elsewhere in this project, though it turned out
+  not to be the actual cause of the wrong-text symptom itself.
+- **Properties dialogs silently empty ("This item does not provide a
+  Properties page") for a real service row, even though the snap-in's
+  `IExtendPropertySheet::QueryPagesFor` reported `S_OK`:** unlike every
+  other CCW-argument bug found in this project, `CreatePropertyPages`
+  didn't throw at all - it just never called back into this host's
+  `PropertySheetCallback.AddPage`, silently returning zero pages. Fixed the
+  same way as `IComponent::Initialize`'s `lpConsole` parameter: bypassed
+  the declarative `[ComImport]` call and marshaled `lpProvider` as the
+  exact interface type mmc.idl declares (`LPPROPERTYSHEETCALLBACK`, not a
+  bare `IUnknown*`) via a raw vtable call
+  (`PropertySheetHost.RawCreatePropertyPages`). Confirmed against real
+  data: "Services" now shows 3 real property pages for an actual service,
+  "Local Users and Groups" shows 3 for a real user account.
+- **A real, confirmed-fixed bug, found by "Print Management" showing every
+  child as a sibling of its parent instead of nested underneath it:**
+  `IConsoleNameSpace::InsertItem`'s `relativeID=0` means "attach under
+  whatever scope item is currently being expanded", not "attach under the
+  absolute root" - see "Known limitations" for the fix
+  (`MmcConsole.ActiveExpandHandle`).
+- **Confirmed, via live mixed-mode debugging into `puiobj.dll`'s
+  `TComponentData::Notify`, that "Print Management"'s empty "Print
+  Servers" node is not a bug in this host:** the full call chain - our
+  `Notify(MMCN_EXPAND)` call reaching the snap-in, it extracting the node
+  type from our data object (`NMMCLibrary::GetNodeTypeFromDataObject`),
+  `QueryInterface`-ing that same data object for two private interfaces
+  (`ISnapinNodeDetails`, `ISnapinNotify` - both specific to this snap-in,
+  obtained by round-tripping the data object this host got from
+  `QueryDataObject` right back to the snap-in, not anything this host
+  implements) and finally invoking `ISnapinNotify::Notify(event, arg,
+  param)` - was traced instruction-by-instruction and returns a clean
+  `S_OK` (`EAX=0`) at every step, including the final delegated call. The
+  snap-in itself simply has no print servers to report: it almost
+  certainly consults a persisted list of previously-added servers
+  (normally populated via "Add/Remove Servers..." in a real mmc.exe
+  session, or carried over from a saved `.msc` file), and this host starts
+  every session from a blank slate - see "No .msc save/load, no
+  persistence" below. This is a real scope boundary, not an interop defect.
 
-The diagnostic command (`ControlPanel.App.exe --diag-load-snapin "<name or
-{CLSID}>" [output-file]`) now exercises all three phases explicitly: static
-node creation, scope expansion, and result-view initialization. Extension
-snap-ins are rejected as standalone roots until NodeType-based attachment to
-a compatible primary node is implemented.
+This replaces an earlier, incorrect lifecycle where this host asked the
+*snap-in* to insert its own static root node via `Notify(MMCN_EXPAND,
+cookie=0)` immediately on load. Real MMC does this itself - a standalone
+snap-in's static node is the console's own creation, inserted before the
+snap-in is ever asked to enumerate anything; the snap-in only populates
+*children* under that node, lazily, when it's actually expanded, and only
+gets an `IComponent` (a result-pane rendering object) created and
+initialized when its result view is actually about to be shown - not
+eagerly at load time. Getting this wrong didn't just fail cleanly: some
+snap-ins accepted the wrong-shaped calls and silently produced zero
+content (misread earlier as "loads, but has nothing to show" rather than
+"loading is fundamentally accepting the wrong protocol steps").
 
 ## Why this exists / how it's built
 
@@ -173,6 +363,47 @@ direction that breaks; `CreateComponent`'s `out` value was changed to
 `object` anyway for consistency, without a diagnostic proving it was
 necessary on its own.
 
+Also found by running rather than reviewing: `IComponentData`/`IComponent
+.GetDisplayInfo` returns its display-name string through a pointer this
+host does **not** own - mmc.idl's convention is that the snap-in retains
+that allocation (until the next `GetDisplayInfo` call for the same item,
+item deletion, or its own `Destroy`), unlike the more common COM pattern
+where an `[out] BSTR`/`LPWSTR` parameter transfers ownership to the caller.
+This host originally called `Marshal.FreeCoTaskMem` on it after copying
+the string out, on the (wrong, but very standard-COM-shaped) assumption
+that it was the caller's to free - corrupting the snap-in's own heap
+allocator. The practical symptom was not a clean exception: "Local Users
+and Groups" hit an unrecoverable "Internal CLR error" (the process
+terminates outright, no catchable exception, no stack trace) sometime
+after the corrupted heap was reused. Fixed by simply not freeing that
+pointer; this host only ever borrows it. This is the same general lesson
+as the `ImageListSetIcon`/`ImageListSetStrip` bug above - a parameter's
+*type* being correct (or, here, entirely implicit/undocumented in the
+struct layout itself) doesn't mean its ownership/calling convention
+matches the more common COM pattern the type name suggests, and this
+category of bug doesn't surface until a real snap-in's code path actually
+exercises it.
+
+Found immediately after the static-root lifecycle correction above, by
+running the newly-recursive diagnostic against "Print Management": every
+child a snap-in inserted with `relativeID=0` (the common case - a mask of
+`SDI_PARENT`, MMC's default, with a zero handle) was attached directly
+under this host's own synthetic, invisible "Console Root" container,
+*not* under the scope item currently being expanded. A snap-in is
+entitled to pass `relativeID=0` during its `Notify(MMCN_EXPAND)` handler
+to mean "attach under whatever item this expand call is for" instead of
+repeating that item's own `HSCOPEITEM` - this host was instead treating
+zero as always meaning the true root, unconditionally. The practical
+effect: every one of "Print Management"'s children ("Custom Filters",
+"Print Servers", "Deployed Printers") rendered as *siblings* of "Print
+Management" itself rather than nested under it (and identically for
+"Local Users and Groups"'s "Users"/"Groups") - structurally wrong, but not
+wrong in a way that throws, so nothing on the failure path caught it.
+Fixed by tracking which `HSCOPEITEM` a `Notify(MMCN_EXPAND)` call is
+currently in flight for (`MmcConsole.ActiveExpandHandle`, set by
+`SnapInSession.ExpandNode`) and using it as the effective parent whenever
+`InsertItem` receives a zero `relativeID` during that window.
+
 Assume more exist and treat this as a serious-but-unverified starting
 point, not a finished, drop-in mmc.exe replacement:
 
@@ -215,14 +446,26 @@ point, not a finished, drop-in mmc.exe replacement:
   silently failing - but a snap-in that loads without erroring is not
   proof it's behaving correctly.
 - `Properties` calls `IExtendPropertySheet` and shows the resulting pages
-  with the real Win32 `PropertySheet()` API, but does not implement the
-  `MMCPropertyChangeNotify`/`MMCFreeNotifyHandle` handle-correlation
-  protocol a property page's own code may call into (these are exported
-  by `mmc.lib`/expected to resolve against the hosting console process).
-  Best case, "Apply" just won't refresh the tree/list automatically.
-  Worse case, for a page that calls these unconditionally, property pages
-  could fail to behave correctly or even to load - this has not been
-  verified against a real snap-in.
+  with the real Win32 `PropertySheet()` API. This originally flagged a
+  theoretical risk around the `handle` (`LONG_PTR`) parameter of
+  `CreatePropertyPages` - and it turned out to be real, found the hard way:
+  `PropertySheetHost` originally passed a synthetic incrementing `IntPtr`
+  as that handle, since nothing in the interop declarations said otherwise.
+  Live debugging into a genuine, intermittent (only on close, not every
+  time) native heap corruption (`STATUS_HEAP_CORRUPTION`) traced it to
+  `localsec.dll!MMCPropertyPage::NotificationState`'s destructor calling
+  `GlobalFree()` directly on that value when a page is destroyed - real
+  mmc.exe apparently allocates this handle via `GlobalAlloc`, and
+  `GlobalFree`-ing anything else (like a small integer) corrupts the
+  process heap instead of failing cleanly. Fixed by actually calling
+  `Win32.GlobalAlloc` for this handle and never freeing it here (ownership
+  passes to the snap-in). `MMCPropertyChangeNotify` itself remains
+  unimplemented - a page's "Apply" may still not refresh the tree/list -
+  but page open/close no longer corrupts the process. A separate,
+  unrelated bug in this project's own `PROPSHEETHEADER` struct (missing
+  the modern, ComCtl32-v6-era trailing `hplWatermark`/`hbmHeader` fields,
+  reported `dwSize` therefore describing a smaller struct than
+  `PropertySheet()` expects) was found and fixed alongside this.
 - `MmcConsole.ActiveSession` is a single ambient "who's calling me right
   now" field, set around each call into a snap-in
   (`MmcConsole.RunWithSession`). This is correct for the synchronous,

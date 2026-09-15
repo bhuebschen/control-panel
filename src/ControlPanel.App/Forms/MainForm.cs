@@ -301,7 +301,11 @@ internal sealed class MainForm : Form
 
         var row = _console.ResultRows[e.ItemIndex];
         var text = _list.Columns.Count > 0 ? _console.GetResultColumnText(row, 0) : string.Empty;
-        var item = new ListViewItem(text) { ImageIndex = row.ImageIndex, Tag = row };
+        var item = new ListViewItem(text)
+        {
+            ImageIndex = MmcConsole.OffsetImageIndex(row.ImageIndex, row.Session.ResultImageBase),
+            Tag = row,
+        };
         for (int col = 1; col < _list.Columns.Count; col++)
         {
             item.SubItems.Add(_console.GetResultColumnText(row, col));

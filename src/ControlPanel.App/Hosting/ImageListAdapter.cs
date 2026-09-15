@@ -19,10 +19,20 @@ namespace ControlPanel.App.Hosting;
 internal sealed class ImageListAdapter : IImageList
 {
     private readonly ImageList _target;
+    private readonly Func<int> _currentIndexBase;
 
-    public ImageListAdapter(ImageList target)
+    /// <param name="currentIndexBase">
+    /// Returns the calling snap-in session's reserved starting index in
+    /// this shared list (see SnapInSession.ScopeImageBase/ResultImageBase)
+    /// - every nLoc/nStartLoc this adapter receives is relative to that
+    /// session's own icon numbering (which starts at 0 with no knowledge
+    /// that other snap-ins share this same underlying ImageList), so it
+    /// must be added before touching the real, shared list.
+    /// </param>
+    public ImageListAdapter(ImageList target, Func<int> currentIndexBase)
     {
         _target = target;
+        _currentIndexBase = currentIndexBase;
     }
 
     public void ImageListSetIcon(IntPtr pIcon, int nLoc)
@@ -100,6 +110,8 @@ internal sealed class ImageListAdapter : IImageList
         {
             return;
         }
+
+        index += _currentIndexBase();
 
         while (_target.Images.Count <= index)
         {

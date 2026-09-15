@@ -22,11 +22,28 @@ internal sealed class SnapInSession
     public required IComponentData ComponentData { get; init; }
     public IComponent Component { get; private set; } = null!;
 
+    /// <summary>See RawGetDisplayInfo for why this bypasses the declarative interface call.</summary>
+    public void GetResultDisplayInfo(ref RESULTDATAITEM item) => RawGetDisplayInfo(Component, ref item);
+
     private bool _componentCreated;
     private bool _componentDataInitialized;
     private bool _destroyed;
 
     public ScopeNode RootNode { get; private set; } = null!;
+
+    /// <summary>
+    /// Every loaded snap-in shares the same underlying scope/result
+    /// ImageList (one MmcConsole for the whole app), but each snap-in
+    /// numbers its own icons from 0 with no knowledge of any other
+    /// snap-in sharing the list. Without a per-session offset, a second
+    /// snap-in's ImageListSetIcon(hIcon, 0) overwrites the first snap-in's
+    /// icon at that same index - confirmed: loading a second .msc changed
+    /// icons already showing in the first one. ScopeImageBase/ResultImageBase
+    /// are this session's reserved starting index in each shared list;
+    /// see ImageListAdapter and the ImageIndex-using code in MmcConsole.
+    /// </summary>
+    public int ScopeImageBase { get; init; }
+    public int ResultImageBase { get; init; }
 
     public static SnapInSession Load(SnapInInfo info, MmcConsole console)
     {
@@ -48,10 +65,13 @@ internal sealed class SnapInSession
             throw new InvalidOperationException($"'{info.Name}' does not implement IComponentData.");
         }
 
+        console.AllocateImageBases(out int scopeImageBase, out int resultImageBase);
         var session = new SnapInSession
         {
             Info = info,
             ComponentData = componentData,
+            ScopeImageBase = scopeImageBase,
+            ResultImageBase = resultImageBase,
         };
 
         try
@@ -90,6 +110,74 @@ internal sealed class SnapInSession
     [UnmanagedFunctionPointer(CallingConvention.StdCall)]
     private delegate int NotifyNative(IntPtr @this, IntPtr lpDataObject, int @event, IntPtr arg, IntPtr param);
 
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    private delegate int ComponentGetDisplayInfoNative(IntPtr @this, IntPtr pResultDataItem);
+
+    /// <summary>
+    /// Raw-vtable IComponent::GetDisplayInfo(ref RESULTDATAITEM) call - the
+    /// declarative [ComImport] binding for this one (unlike the plain-IntPtr
+    /// calls above) marshals a *struct passed by ref*, and for "Local Users
+    /// and Groups" every row came back with the exact same text (the
+    /// snap-in's own static-node description) regardless of itemID/cookie -
+    /// strongly suggesting the struct's input fields (itemID/nCol in
+    /// particular) never actually reached the native call, so the snap-in
+    /// always saw the same (probably zeroed/default) request. Bypassing the
+    /// stub and marshaling the struct into native memory ourselves
+    /// (Marshal.StructureToPtr/PtrToStructure) fixed it.
+    /// </summary>
+    private static void RawGetDisplayInfo(IComponent component, ref RESULTDATAITEM item)
+    {
+        var iid = typeof(IComponent).GUID;
+        IntPtr componentUnk = Marshal.GetIUnknownForObject(component);
+        try
+        {
+            int hr = Marshal.QueryInterface(componentUnk, ref iid, out IntPtr componentItf);
+            Marshal.ThrowExceptionForHR(hr, new IntPtr(-1));
+            try
+            {
+                NativePointerGuard.EnsureReadable(componentItf, $"{iid:B} interface pointer");
+                IntPtr vtable = Marshal.ReadIntPtr(componentItf, 0);
+                NativePointerGuard.EnsureReadable(vtable, $"{iid:B} vtable");
+                // Slot 8: QueryInterface/AddRef/Release, then Initialize(3),
+                // Notify(4), Destroy(5), QueryDataObject(6),
+                // GetResultViewType(7), GetDisplayInfo(8) - matching this
+                // interface's declaration order in ISnapInInterfaces.cs.
+                IntPtr slotPtr = Marshal.ReadIntPtr(vtable, 8 * IntPtr.Size);
+                NativePointerGuard.EnsureExecutable(slotPtr, $"{iid:B} vtable slot 8 (GetDisplayInfo)");
+                var getDisplayInfo = Marshal.GetDelegateForFunctionPointer<ComponentGetDisplayInfoNative>(slotPtr);
+
+                IntPtr nativeItem = Marshal.AllocHGlobal(Marshal.SizeOf<RESULTDATAITEM>());
+                try
+                {
+                    SnapInDiagnostics.Trace(
+                        $"RawGetDisplayInfo IN: mask=0x{item.mask:X8} itemID=0x{item.itemID:X} nCol={item.nCol} lParam=0x{item.lParam:X}");
+                    Marshal.StructureToPtr(item, nativeItem, fDeleteOld: false);
+                    int result = getDisplayInfo(componentItf, nativeItem);
+                    item = Marshal.PtrToStructure<RESULTDATAITEM>(nativeItem);
+                    SnapInDiagnostics.Trace(
+                        $"RawGetDisplayInfo OUT: hr=0x{result:X8} str=0x{item.str:X} text='{Marshal.PtrToStringUni(item.str)}'");
+                    if (result < 0)
+                    {
+                        throw new COMException(
+                            $"Raw IComponent::GetDisplayInfo returned HRESULT 0x{result:X8}.", result);
+                    }
+                }
+                finally
+                {
+                    Marshal.FreeHGlobal(nativeItem);
+                }
+            }
+            finally
+            {
+                Marshal.Release(componentItf);
+            }
+        }
+        finally
+        {
+            Marshal.Release(componentUnk);
+        }
+    }
+
     /// <summary>
     /// Raw-vtable Notify call - see the call sites for why. targetIid/slot
     /// select IComponentData::Notify (slot 5) or IComponent::Notify (slot 4);
@@ -123,7 +211,7 @@ internal sealed class SnapInSession
                         $"hasDataObject={lpDataObject is not null}");
                     var notify = Marshal.GetDelegateForFunctionPointer<NotifyNative>(slotPtr);
                     int result = notify(targetItf, dataObjPtr, (int)@event, arg, param);
-                    SnapInDiagnostics.Trace($"RawNotify({@event}, arg=0x{arg:X}, param=0x{param:X}, hasDataObject={lpDataObject is not null}) = 0x{result:X8}");
+                    SnapInDiagnostics.Trace($"Ra    wNotify({@event}, arg=0x{arg:X}, param=0x{param:X}, hasDataObject={lpDataObject is not null}) = 0x{result:X8}");
                     // result < 0, not != 0: S_FALSE (1) is a legitimate
                     // success code some snap-ins return from Notify, not a
                     // failure - only the HRESULT sign bit means failure.
@@ -366,12 +454,21 @@ internal sealed class SnapInSession
             console.RunWithSession(this, () =>
             {
                 var dataObject = TryGetScopeDataObject(node);
-                RawNotify(
-                    ComponentData,
-                    dataObject,
-                    MMC_NOTIFY_TYPE.MMCN_EXPAND,
-                    new IntPtr(1),
-                    node.Handle);
+                var previousExpandHandle = console.ActiveExpandHandle;
+                console.ActiveExpandHandle = node.Handle;
+                try
+                {
+                    RawNotify(
+                        ComponentData,
+                        dataObject,
+                        MMC_NOTIFY_TYPE.MMCN_EXPAND,
+                        new IntPtr(1),
+                        node.Handle);
+                }
+                finally
+                {
+                    console.ActiveExpandHandle = previousExpandHandle;
+                }
             });
 
             node.ChildrenLoaded = true;

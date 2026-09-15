@@ -10,6 +10,10 @@ internal static class Program
     private static void Main(string[] args)
     {
         Win32.EnsureCommonControlsInitialized();
+        if(!System.Diagnostics.Debugger.IsAttached)
+        {
+            MfcCompatibilityShim.Install();
+        }
 
         if (args.Length >= 1 && args[0] == "--diag-load-snapin")
         {

@@ -19,7 +19,7 @@ namespace ControlPanel.App.Hosting;
 [ComVisible(true)]
 [ClassInterface(ClassInterfaceType.None)]
 [ComDefaultInterface(typeof(IConsole2))]
-internal sealed class MmcConsole : IConsole2, IConsoleNameSpace2, IHeaderCtrl2, IResultData, IDisplayHelp, IConsoleVerb, IControlbar, IToolbar, IPropertySheetProvider, IColumnData
+internal sealed class MmcConsole : IConsole2, IConsoleNameSpace2, IHeaderCtrl2, IResultData, IDisplayHelp, IConsoleVerb, IControlbar, IToolbar, IPropertySheetProvider, IColumnData, IImageList
 {
     private readonly TreeView _tree;
     private readonly ListView _list;
@@ -46,7 +46,54 @@ internal sealed class MmcConsole : IConsole2, IConsoleNameSpace2, IHeaderCtrl2, 
     /// </summary>
     public SnapInSession? ActiveSession { get; set; }
 
+    /// <summary>
+    /// The scope item a Notify(MMCN_EXPAND) call is currently in flight for
+    /// (set by SnapInSession.ExpandNode around that call). Several snap-ins
+    /// (Print Management among them) pass relativeID=0 to InsertItem to mean
+    /// "attach under whatever item is currently being expanded" instead of
+    /// repeating that item's own HSCOPEITEM - real mmc.exe apparently
+    /// resolves that the same way. IntPtr.Zero here means "no expand is
+    /// currently in flight", in which case relativeID=0 falls back to
+    /// meaning the true (synthetic) console root, as before.
+    /// </summary>
+    public IntPtr ActiveExpandHandle { get; set; } = IntPtr.Zero;
+
     public event Action<string>? StatusTextChanged;
+
+    private int _nextScopeImageBase;
+    private int _nextResultImageBase;
+    private const int ImageIndexBlockSize = 512;
+
+    /// <summary>
+    /// Reserves a fresh, non-overlapping block of indices in each shared
+    /// image list for one snap-in session - see SnapInSession.ScopeImageBase
+    /// for why this is needed (every session shares one MmcConsole, and
+    /// each snap-in numbers its own icons from 0 with no idea another
+    /// snap-in shares the list). A fixed block size is pragmatic: generous
+    /// enough that no real snap-in is likely to register more distinct
+    /// icons than this, and avoids needing to know a snap-in's icon count
+    /// up front.
+    /// </summary>
+    public void AllocateImageBases(out int scopeImageBase, out int resultImageBase)
+    {
+        scopeImageBase = _nextScopeImageBase;
+        resultImageBase = _nextResultImageBase;
+        _nextScopeImageBase += ImageIndexBlockSize;
+        _nextResultImageBase += ImageIndexBlockSize;
+    }
+
+    /// <summary>
+    /// Converts a snap-in's own icon index (always 0-based from that
+    /// snap-in's point of view) into the real index in the shared
+    /// TreeView/ListView ImageList, by adding the owning session's
+    /// reserved block start - -1 ("no icon") passes through unchanged.
+    /// Only ever applied at the WinForms-control-facing edge
+    /// (TreeNode.ImageIndex, ListViewItem.ImageIndex); ScopeNode.ImageIndex/
+    /// ResultRow.ImageIndex themselves stay in the snap-in's own raw
+    /// numbering, since GetItem hands them straight back to the snap-in
+    /// and must not apply this offset.
+    /// </summary>
+    internal static int OffsetImageIndex(int rawIndex, int indexBase) => rawIndex < 0 ? -1 : rawIndex + indexBase;
 
     public MmcConsole(TreeView tree, ListView list, TreeNode consoleRoot, ImageList scopeImageList, ImageList resultImageList, Form ownerForm)
     {
@@ -54,8 +101,8 @@ internal sealed class MmcConsole : IConsole2, IConsoleNameSpace2, IHeaderCtrl2, 
         _list = list;
         _consoleRoot = consoleRoot;
         _ownerForm = ownerForm;
-        ScopeImages = new ImageListAdapter(scopeImageList);
-        ResultImages = new ImageListAdapter(resultImageList);
+        ScopeImages = new ImageListAdapter(scopeImageList, () => ActiveSession?.ScopeImageBase ?? 0);
+        ResultImages = new ImageListAdapter(resultImageList, () => ActiveSession?.ResultImageBase ?? 0);
     }
 
     public T RunWithSession<T>(SnapInSession session, Func<T> action)
@@ -284,7 +331,7 @@ internal sealed class MmcConsole : IConsole2, IConsoleNameSpace2, IHeaderCtrl2, 
         }
         else
         {
-            parentHandle = item.relativeID;
+            parentHandle = item.relativeID != IntPtr.Zero ? item.relativeID : ActiveExpandHandle;
             if (parentHandle == IntPtr.Zero)
             {
                 parentUiNode = _consoleRoot;
@@ -340,8 +387,9 @@ internal sealed class MmcConsole : IConsole2, IConsoleNameSpace2, IHeaderCtrl2, 
         }
         var uiNode = new TreeNode(node.DisplayName)
         {
-            ImageIndex = node.ImageIndex,
-            SelectedImageIndex = node.OpenImageIndex >= 0 ? node.OpenImageIndex : node.ImageIndex,
+            ImageIndex = OffsetImageIndex(node.ImageIndex, session.ScopeImageBase),
+            SelectedImageIndex = OffsetImageIndex(
+                node.OpenImageIndex >= 0 ? node.OpenImageIndex : node.ImageIndex, session.ScopeImageBase),
         };
         node.UiNode = uiNode;
 
@@ -458,13 +506,13 @@ internal sealed class MmcConsole : IConsole2, IConsoleNameSpace2, IHeaderCtrl2, 
         if ((item.mask & MmcConsts.SDI_IMAGE) != 0 && node.UiNode is not null)
         {
             node.ImageIndex = item.nImage;
-            node.UiNode.ImageIndex = item.nImage;
+            node.UiNode.ImageIndex = OffsetImageIndex(item.nImage, node.Session.ScopeImageBase);
         }
 
         if ((item.mask & MmcConsts.SDI_OPENIMAGE) != 0 && node.UiNode is not null)
         {
             node.OpenImageIndex = item.nOpenImage;
-            node.UiNode.SelectedImageIndex = item.nOpenImage;
+            node.UiNode.SelectedImageIndex = OffsetImageIndex(item.nOpenImage, node.Session.ScopeImageBase);
         }
 
         if ((item.mask & MmcConsts.SDI_CHILDREN) != 0)
@@ -947,6 +995,26 @@ internal sealed class MmcConsole : IConsole2, IConsoleNameSpace2, IHeaderCtrl2, 
     }
 
     // ------------------------------------------------------------------
+    // IImageList
+    //
+    // Obtained by a snap-in via a direct QueryInterface on the IConsole
+    // pointer itself (confirmed via live debugging into filemgmt.dll's
+    // CComponent::Initialize - "Services" and "Shared Folders", both
+    // implemented by that DLL, QueryInterface the console object directly
+    // for IID_IImageList, separately from the QueryScopeImageList/
+    // QueryResultImageList methods on IConsole, and failed their own
+    // Initialize with E_NOINTERFACE when this host didn't implement it -
+    // real mmc.exe's console object answers this directly too). Delegates
+    // to the scope image list, matching the convention several other
+    // snap-ins already rely on QueryScopeImageList/QueryResultImageList for.
+    // ------------------------------------------------------------------
+
+    public void ImageListSetIcon(IntPtr pIcon, int nLoc) => ScopeImages.ImageListSetIcon(pIcon, nLoc);
+
+    public void ImageListSetStrip(IntPtr pBMapSm, IntPtr pBMapLg, int nStartLoc, int cMask) =>
+        ScopeImages.ImageListSetStrip(pBMapSm, pBMapLg, nStartLoc, cMask);
+
+    // ------------------------------------------------------------------
     // IColumnData
     //
     // Obtained by a snap-in via a direct QueryInterface on the IConsole
@@ -991,14 +1059,23 @@ internal sealed class MmcConsole : IConsole2, IConsoleNameSpace2, IHeaderCtrl2, 
             return cached;
         }
 
+        // RDI_PARAM/lParam must be resupplied here even though itemID alone
+        // identifies the row to *this host* - confirmed via live debugging
+        // that "Local Users and Groups" (localsec.dll) looks its own
+        // per-item data up via lParam (ComponentData::GetInstanceFromCookie),
+        // not itemID. Omitting it left lParam at its default zero, which
+        // resolved to "the root item" for every single row - every row
+        // showed the snap-in's own static-node description instead of its
+        // own text.
         var item = new RESULTDATAITEM
         {
-            mask = MmcConsts.RDI_STR,
+            mask = MmcConsts.RDI_STR | MmcConsts.RDI_PARAM,
             itemID = row.ItemId,
             nCol = column,
+            lParam = row.Cookie,
         };
 
-        RunWithSession(row.Session, () => row.Session.Component.GetDisplayInfo(ref item));
+        RunWithSession(row.Session, () => row.Session.GetResultDisplayInfo(ref item));
 
         var text = BorrowedStringToManaged(item.str) ?? string.Empty;
         row.ColumnCache[column] = text;

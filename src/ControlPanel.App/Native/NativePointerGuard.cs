@@ -20,6 +20,29 @@ internal static class NativePointerGuard
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern nuint VirtualQuery(IntPtr lpAddress, out MEMORY_BASIC_INFORMATION lpBuffer, nuint dwLength);
 
+    [DllImport("kernel32.dll", CharSet = CharSet.Ansi, SetLastError = true)]
+    private static extern IntPtr GetModuleHandle(string? lpModuleName);
+
+    /// <summary>
+    /// True if <paramref name="address"/> falls within the loaded module
+    /// <paramref name="moduleName"/>'s mapped image (matched via the
+    /// allocation base VirtualQuery reports, which for a loaded PE image is
+    /// the module's own base address - the same technique
+    /// GetModuleHandle/GetModuleFileName use internally). Used by
+    /// MfcCompatibilityShim to confirm a faulting instruction genuinely
+    /// lives inside a specific system DLL before "fixing up" the fault.
+    /// </summary>
+    public static bool IsFromModule(IntPtr address, string moduleName)
+    {
+        IntPtr moduleBase = GetModuleHandle(moduleName);
+        if (moduleBase == IntPtr.Zero)
+        {
+            return false;
+        }
+
+        return TryQuery(address, out var mbi) && mbi.AllocationBase == moduleBase;
+    }
+
     [StructLayout(LayoutKind.Sequential)]
     private struct MEMORY_BASIC_INFORMATION
     {
