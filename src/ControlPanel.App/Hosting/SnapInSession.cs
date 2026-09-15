@@ -113,7 +113,14 @@ internal sealed class SnapInSession
                     NativePointerGuard.EnsureReadable(vtable, $"{targetIid:B} vtable");
                     IntPtr slotPtr = Marshal.ReadIntPtr(vtable, notifySlot * IntPtr.Size);
                     NativePointerGuard.EnsureExecutable(slotPtr, $"{targetIid:B} vtable slot {notifySlot} (Notify)");
-                    SnapInDiagnostics.Trace($"RawNotify target={targetItf:X} vtable={vtable:X} slot[{notifySlot}]={slotPtr:X}");
+                    // Log the event before crossing the native boundary.  An
+                    // AccessViolation raised inside a snap-in never returns,
+                    // so a post-call-only event name made the crash log
+                    // needlessly ambiguous.
+                    SnapInDiagnostics.Trace(
+                        $"RawNotify entering {@event}: target={targetItf:X} vtable={vtable:X} " +
+                        $"slot[{notifySlot}]={slotPtr:X}, arg=0x{arg:X}, param=0x{param:X}, " +
+                        $"hasDataObject={lpDataObject is not null}");
                     var notify = Marshal.GetDelegateForFunctionPointer<NotifyNative>(slotPtr);
                     int result = notify(targetItf, dataObjPtr, (int)@event, arg, param);
                     SnapInDiagnostics.Trace($"RawNotify({@event}, arg=0x{arg:X}, param=0x{param:X}, hasDataObject={lpDataObject is not null}) = 0x{result:X8}");
@@ -402,10 +409,65 @@ internal sealed class SnapInSession
         console.RunWithSession(this, () =>
         {
             var dataObject = TryGetScopeDataObject(node);
-            RawNotify(Component, dataObject, MMC_NOTIFY_TYPE.MMCN_SELECT, MakeSelectArg(scope: true, select: true), IntPtr.Zero);
+
+            // This is part of MMC's scope-selection protocol, not an
+            // optional query.  Besides choosing standard/custom view, some
+            // native snap-ins use it to establish the per-node view state
+            // consumed by their following MMCN_SHOW handler.
+            EnsureStandardResultView(node);
+
+            // MMCN_SHOW(TRUE) is the notification that tells the snap-in to
+            // set up and populate the result pane.  Only after that pane
+            // exists may MMCN_SELECT ask it to update selection-dependent
+            // verbs/toolbars.  Sending SELECT first happened to work for
+            // simpler snap-ins, but leaves more stateful native snap-ins
+            // (notably Component Services) without a current result view.
             RawNotify(Component, dataObject, MMC_NOTIFY_TYPE.MMCN_SHOW, new IntPtr(1), node.Handle);
+            RawNotify(Component, dataObject, MMC_NOTIFY_TYPE.MMCN_SELECT, MakeSelectArg(scope: true, select: true), IntPtr.Zero);
         });
         node.ResultsLoaded = true;
+    }
+
+    private void EnsureStandardResultView(ScopeNode node)
+    {
+        IntPtr viewTypePtr = IntPtr.Zero;
+        int viewOptions = 0;
+        int hr = Component.GetResultViewType(node.Cookie, out viewTypePtr, out viewOptions);
+
+        string? viewType = null;
+        try
+        {
+            if (viewTypePtr != IntPtr.Zero)
+            {
+                viewType = Marshal.PtrToStringUni(viewTypePtr);
+            }
+        }
+        finally
+        {
+            // mmc.idl makes the caller responsible for freeing the string,
+            // including when a non-S_OK success code was returned.
+            if (viewTypePtr != IntPtr.Zero)
+            {
+                Marshal.FreeCoTaskMem(viewTypePtr);
+            }
+        }
+
+        SnapInDiagnostics.Trace(
+            $"IComponent.GetResultViewType(cookie=0x{node.Cookie:X}) = 0x{hr:X8}, " +
+            $"viewType='{viewType ?? "<standard>"}', options=0x{viewOptions:X8}");
+
+        if (hr < 0)
+        {
+            throw new COMException(
+                $"IComponent.GetResultViewType returned HRESULT 0x{hr:X8}.", hr);
+        }
+
+        if (!string.IsNullOrWhiteSpace(viewType))
+        {
+            throw new NotSupportedException(
+                $"'{Info.Name}' requested the custom MMC result view '{viewType}' for " +
+                $"'{node.DisplayName}'. This host currently supports standard list views only.");
+        }
     }
 
     public void HideResults(MmcConsole console, ScopeNode node)

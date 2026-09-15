@@ -63,7 +63,10 @@ internal interface IComponent
     void Notify([MarshalAs(UnmanagedType.Interface)] object? lpDataObject, MMC_NOTIFY_TYPE @event, IntPtr arg, IntPtr param);
     void Destroy(IntPtr cookie);
     void QueryDataObject(IntPtr cookie, DATA_OBJECT_TYPES type, out IDataObject ppDataObject);
-    void GetResultViewType(IntPtr cookie, out IntPtr ppViewType, out int pViewOptions);
+    // Keep the HRESULT so the host can log the exact result and distinguish
+    // failures from nonzero success codes without relying on an exception.
+    [PreserveSig]
+    int GetResultViewType(IntPtr cookie, out IntPtr ppViewType, out int pViewOptions);
     void GetDisplayInfo(ref RESULTDATAITEM pResultDataItem);
     [PreserveSig]
     int CompareObjects([MarshalAs(UnmanagedType.Interface)] object lpDataObjectA, [MarshalAs(UnmanagedType.Interface)] object lpDataObjectB);
