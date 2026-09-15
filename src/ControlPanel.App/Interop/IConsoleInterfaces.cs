@@ -18,15 +18,29 @@ internal interface IConsole
     void SetHeader(IHeaderCtrl pHeader);
     void SetToolbar(IntPtr pToolbar);
     void QueryResultView([MarshalAs(UnmanagedType.IUnknown)] out object pUnknown);
-    void QueryScopeImageList(out IImageList ppImageList);
-    void QueryResultImageList(out IImageList ppImageList);
+    // ppImageList/ppConsoleVerb: out parameters returning OUR OWN CCW
+    // object (ImageListAdapter / this MmcConsole) to the native caller.
+    // object + MarshalAs(Interface) was tried first (matching the fix that
+    // worked for *input* parameters carrying our own CCW objects) but
+    // still threw from within the interop marshaler - InvalidOperationException
+    // for one real snap-in, NullReferenceException for another - always
+    // right after this method's body already ran to completion, meaning
+    // the failure is in marshaling the *return*, not in our code. Declaring
+    // this as a raw IntPtr instead and manually calling
+    // Marshal.GetComInterfaceForObject ourselves sidesteps the marshaler
+    // for this direction entirely (IntPtr is blittable, no conversion
+    // logic runs) - the same "drop to the primitive and do it by hand"
+    // fix that already resolved the ImageListSetIcon/Strip and
+    // IComponent.Initialize bugs.
+    void QueryScopeImageList(out IntPtr ppImageList);
+    void QueryResultImageList(out IntPtr ppImageList);
     void UpdateAllViews([MarshalAs(UnmanagedType.Interface)] object? lpDataObject, IntPtr data, IntPtr hint);
     void MessageBox(
         [MarshalAs(UnmanagedType.LPWStr)] string lpszText,
         [MarshalAs(UnmanagedType.LPWStr)] string lpszTitle,
         uint fuStyle,
         out int piRetval);
-    void QueryConsoleVerb(out IConsoleVerb ppConsoleVerb);
+    void QueryConsoleVerb(out IntPtr ppConsoleVerb);
     void SelectScopeItem(IntPtr hScopeItem);
     void GetMainWindow(out IntPtr phwnd);
     void NewWindow(IntPtr hScopeItem, uint lOptions);
@@ -41,15 +55,15 @@ internal interface IConsole2 : IConsole
     new void SetHeader(IHeaderCtrl pHeader);
     new void SetToolbar(IntPtr pToolbar);
     new void QueryResultView([MarshalAs(UnmanagedType.IUnknown)] out object pUnknown);
-    new void QueryScopeImageList(out IImageList ppImageList);
-    new void QueryResultImageList(out IImageList ppImageList);
+    new void QueryScopeImageList(out IntPtr ppImageList);
+    new void QueryResultImageList(out IntPtr ppImageList);
     new void UpdateAllViews([MarshalAs(UnmanagedType.Interface)] object? lpDataObject, IntPtr data, IntPtr hint);
     new void MessageBox(
         [MarshalAs(UnmanagedType.LPWStr)] string lpszText,
         [MarshalAs(UnmanagedType.LPWStr)] string lpszTitle,
         uint fuStyle,
         out int piRetval);
-    new void QueryConsoleVerb(out IConsoleVerb ppConsoleVerb);
+    new void QueryConsoleVerb(out IntPtr ppConsoleVerb);
     new void SelectScopeItem(IntPtr hScopeItem);
     new void GetMainWindow(out IntPtr phwnd);
     new void NewWindow(IntPtr hScopeItem, uint lOptions);

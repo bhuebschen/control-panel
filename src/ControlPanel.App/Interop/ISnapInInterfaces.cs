@@ -21,7 +21,13 @@ namespace ControlPanel.App.Interop;
 internal interface IComponentData
 {
     void Initialize([MarshalAs(UnmanagedType.IUnknown)] object pUnknown);
-    void CreateComponent(out IComponent ppComponent);
+    // ppComponent as object + explicit MarshalAs, for consistency with
+    // every other interface-typed parameter in this file (receiving a
+    // *native* interface pointer into an RCW, as this does, was not
+    // itself implicated by testing - unlike passing our own CCW objects
+    // as arguments/out-values elsewhere - but there's no reason to keep
+    // the one inconsistent declaration once the others all changed).
+    void CreateComponent([MarshalAs(UnmanagedType.Interface)] out object ppComponent);
     // lpDataObject is typed as a plain object (not the IDataObject interface
     // type) marshaled explicitly as an interface pointer, matching the
     // pattern already proven to work for Initialize's pUnknown above -
@@ -42,7 +48,18 @@ internal interface IComponentData
 [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
 internal interface IComponent
 {
-    void Initialize(IConsole lpConsole);
+    // lpConsole is typed as a plain object (not the IConsole interface
+    // type), for the exact same reason as IComponentData.Initialize's
+    // pUnknown: empirically confirmed (via a headless diagnostic against
+    // the real "Services" snap-in) that marshaling OUR OWN managed
+    // CCW-backed object (MmcConsole) into a parameter statically typed as
+    // one of our own [ComImport] interfaces throws InvalidCastException,
+    // while the identical object marshaled through `object` +
+    // MarshalAs(IUnknown) works. Our own raw QueryInterface tests proved
+    // the CCW itself answers QueryInterface for IConsole correctly - the
+    // failure is specifically in how the interop stub marshals a
+    // statically-interface-typed *argument*, not in the object graph.
+    void Initialize([MarshalAs(UnmanagedType.IUnknown)] object lpConsole);
     void Notify([MarshalAs(UnmanagedType.Interface)] object? lpDataObject, MMC_NOTIFY_TYPE @event, IntPtr arg, IntPtr param);
     void Destroy(IntPtr cookie);
     void QueryDataObject(IntPtr cookie, DATA_OBJECT_TYPES type, out IDataObject ppDataObject);
@@ -57,7 +74,11 @@ internal interface IComponent
 [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
 internal interface IExtendPropertySheet
 {
-    void CreatePropertyPages(IPropertySheetCallback lpProvider, IntPtr handle, [MarshalAs(UnmanagedType.Interface)] object lpIDataObject);
+    // lpProvider: same fix as IComponent.Initialize above - it's always our
+    // own PropertySheetCallback CCW object, never an RCW, so it must be
+    // marshaled via object + MarshalAs rather than as a typed interface
+    // parameter.
+    void CreatePropertyPages([MarshalAs(UnmanagedType.Interface)] object lpProvider, IntPtr handle, [MarshalAs(UnmanagedType.Interface)] object lpIDataObject);
     [PreserveSig]
     int QueryPagesFor([MarshalAs(UnmanagedType.Interface)] object lpDataObject);
 }
@@ -67,7 +88,9 @@ internal interface IExtendPropertySheet
 [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
 internal interface IExtendContextMenu
 {
-    void AddMenuItems([MarshalAs(UnmanagedType.Interface)] object piDataObject, IContextMenuCallback piCallback, ref int pInsertionAllowed);
+    // piCallback: same reasoning as IComponent.Initialize/CreatePropertyPages -
+    // always our own CCW object, never an RCW.
+    void AddMenuItems([MarshalAs(UnmanagedType.Interface)] object piDataObject, [MarshalAs(UnmanagedType.Interface)] object piCallback, ref int pInsertionAllowed);
     void Command(int lCommandID, [MarshalAs(UnmanagedType.Interface)] object piDataObject);
 }
 

@@ -1,4 +1,4 @@
-using System.Drawing;
+﻿using System.Drawing;
 using System.Runtime.InteropServices;
 using System.Windows.Forms;
 using ControlPanel.App.Interop;
@@ -14,6 +14,8 @@ namespace ControlPanel.App.Hosting;
 /// them into a real WinForms ImageList the TreeView/ListView render from.
 /// </summary>
 [ComVisible(true)]
+[ClassInterface(ClassInterfaceType.None)]
+[ComDefaultInterface(typeof(IImageList))]
 internal sealed class ImageListAdapter : IImageList
 {
     private readonly ImageList _target;

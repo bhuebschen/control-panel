@@ -44,7 +44,8 @@ internal sealed class SnapInSession
         console.RunWithSession(session, () =>
         {
             componentData.Initialize(console);
-            componentData.CreateComponent(out var component);
+            componentData.CreateComponent(out object componentObj);
+            var component = (IComponent)componentObj;
             session.Component = component;
             component.Initialize(console);
 

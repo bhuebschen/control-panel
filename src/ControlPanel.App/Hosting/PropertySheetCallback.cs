@@ -9,6 +9,8 @@ namespace ControlPanel.App.Hosting;
 /// pages, which we then feed into the Win32 PropertySheet() API.
 /// </summary>
 [ComVisible(true)]
+[ClassInterface(ClassInterfaceType.None)]
+[ComDefaultInterface(typeof(IPropertySheetCallback))]
 internal sealed class PropertySheetCallback : IPropertySheetCallback
 {
     public List<IntPtr> Pages { get; } = new();

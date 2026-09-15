@@ -4,11 +4,65 @@ A .NET 8 WinForms application that hosts MMC (Microsoft Management Console)
 snap-ins **without depending on mmc.exe**. It implements the console-side
 half of the MMC snap-in protocol itself (the "Node Manager" role mmc.exe
 normally plays): the COM interfaces, GUIDs and struct layouts are the real
-ones from the Windows SDK, not a simulation of them. That said, this is an
-independent reimplementation of a large, only-partially-documented part of
-Windows, done without a Windows machine to validate against - see "Known
-limitations and open risks" below before assuming any specific snap-in
-will just work.
+ones from the Windows SDK, not a simulation of them.
+
+**Status: builds and runs on real Windows, and has loaded real snap-ins
+end-to-end** (see "Verified against real snap-ins" below) - this was
+initially written without access to a Windows machine and later built,
+debugged and fixed against one; several real interop bugs were found this
+way and are documented in "Known limitations" below for what they say
+about the parts that haven't been exercised yet.
+
+## Verified against real snap-ins
+
+Using the headless diagnostic (`ControlPanel.App.exe --diag-load-snapin
+"<name or {CLSID}>" [output-file]`, see `Native/SnapInDiagnostics.cs`) to
+run the full `CoCreateInstance` &rarr; `IComponentData.Initialize` &rarr;
+`CreateComponent` &rarr; `IComponent.Initialize` &rarr; `MMCN_EXPAND`
+sequence non-interactively against every snap-in registered on a real
+Windows 11 machine:
+
+- **Fully successful, end-to-end, with real root scope nodes inserted:**
+  the "Folder" and "ActiveX Control" snap-ins (`{C96401CC-...}` /
+  `{C96401CF-...}`).
+- **Fails for reasons unrelated to this host's interop code** (confirmed
+  by testing raw COM calls that bypass this project's C# interface
+  declarations entirely): "Classic Event Viewer" - its own `Initialize`
+  genuinely returns `E_NOINTERFACE`, most likely because (per its own
+  registration name) it's an extension snap-in, never meant to be loaded
+  standalone.
+- **Real bugs found and fixed this way, in order:** an `InvalidCastException`
+  from `IComponent.Initialize(IConsole lpConsole)` (fixed: `object` +
+  `MarshalAs(IUnknown)`, see "Known limitations"); after that, an
+  `InvalidOperationException`/`NullReferenceException` (different exception
+  types for different snap-ins, same underlying cause) thrown by .NET's own
+  interop marshaler - not this project's code, not the snap-in's - when
+  returning this host's own `IImageList`/`IConsoleVerb` objects through
+  `out object` parameters marshaled as `MarshalAs(Interface)`; fixed by
+  dropping to a raw `out IntPtr` and calling
+  `Marshal.GetComInterfaceForObject` explicitly instead of relying on the
+  high-level marshaler for that direction.
+- **Progress, not yet fully resolved:** "Services" and "Component Services"
+  both now get further than before each fix - reaching real reentrant
+  calls into this host's `IConsole`/`IImageList` (`QueryScopeImageList`,
+  `SetHeader`) that complete successfully - but still ultimately fail
+  with a generic `InvalidOperationException` when their own
+  `IComponent::Initialize` call returns. This persisted across every
+  marshaling variant tried so far and across running elevated, and two
+  independent ReactOS MMC reimplementation attempts
+  (`base/applications/mmc` and the more complete `mmc_new`) turned out not
+  to help - the relevant methods there are unfinished `__debugbreak()`
+  stubs or code disabled with `#if 0`, never actually exercised against a
+  real snap-in either. Root cause not yet found; "Local Users and Groups"
+  hits a related but more severe "Internal CLR error" (unrecoverable) at
+  the same general point, which would need native debugging to go further.
+
+The two full successes prove the core mechanism - real snap-in DLL,
+loaded by CLSID, driven through this host's own `IConsole`/
+`IConsoleNameSpace2`/`IImageList` implementation with no mmc.exe involved
+- genuinely works end-to-end. The remaining failures are a mix of "not
+this host's fault" (confirmed) and "real, only partially understood
+interop behavior" (flagged honestly above rather than papered over).
 
 ## Why this exists / how it's built
 
@@ -121,6 +175,33 @@ running against a real snap-in reveals - the parameter *type* was right
 and reviewed as such; its documented real-world calling convention was
 not what the type name implied.
 
+The next round, still found by running rather than reviewing, was a
+family of `InvalidCastException`/`InvalidOperationException` failures
+inside .NET's own COM interop marshaling (not this project's code, and
+not the snap-in's) whenever a method parameter or `out` value was typed
+as one of this project's own custom `[ComImport]` interfaces (`IConsole`,
+`IPropertySheetCallback`, `IImageList`, `IConsoleVerb`) to carry an
+instance of a class *this host itself implements* (`MmcConsole`,
+`ImageListAdapter`, `PropertySheetCallback` - i.e. a CCW, not an RCW).
+Confirmed empirically: `IComponent.Initialize(IConsole lpConsole)` threw
+`InvalidCastException` when called with a real snap-in
+(`{58221C66-...}`, "Services"); changing the parameter to
+`object`/`[MarshalAs(UnmanagedType.IUnknown)]` (matching
+`IComponentData.Initialize`'s already-correct `pUnknown` parameter)
+fixed it, and the same fix was applied consistently everywhere else this
+host hands one of its own objects to a snap-in
+(`IConsole.QueryScopeImageList`/`QueryResultImageList`/
+`QueryConsoleVerb`'s `out` values, `IExtendPropertySheet
+.CreatePropertyPages`'s callback, `IExtendContextMenu.AddMenuItems`'s
+callback). Receiving a *native* interface pointer into a strongly-typed
+RCW (`IComponentData.CreateComponent`'s `out IComponent`,
+`IComponentData/IComponent.QueryDataObject`'s `out IDataObject`) was not
+itself implicated by this - it's specifically the "hand our own CCW
+object to native code through a statically-typed custom interface"
+direction that breaks; `CreateComponent`'s `out` value was changed to
+`object` anyway for consistency, without a diagnostic proving it was
+necessary on its own.
+
 Assume more exist and treat this as a serious-but-unverified starting
 point, not a finished, drop-in mmc.exe replacement:
 
@@ -200,11 +281,20 @@ dotnet build ControlPanel.sln
 Run `src/ControlPanel.App/bin/Debug/net8.0-windows/ControlPanel.App.exe`.
 Many useful snap-ins (Device Manager, Group Policy, Certificates, ...)
 require running elevated to fully populate - launch the app "as
-Administrator" if a snap-in appears empty or fails to load.
+Administrator" if a snap-in appears empty or fails to load (though note
+running elevated has not, on its own, fixed either of the two snap-ins
+currently failing - see "Verified against real snap-ins" above).
 
-> This code was written and reviewed in a Linux sandbox with no Windows
-> machine or .NET Desktop workload available, so it could not be compiled
-> or run end-to-end before delivery. The COM interop layer (GUIDs, struct
-> layouts, vtable ordering) was cross-checked against the public Windows
-> SDK `mmc.idl`. Please build and smoke-test on Windows before relying on
-> it, and report back anything that doesn't compile or misbehaves.
+To debug why a *specific* snap-in fails to load without going through the
+UI each time, use the built-in headless diagnostic:
+
+```
+ControlPanel.App.exe --diag-load-snapin "<snap-in name or {CLSID}>" [output-file]
+```
+
+It runs the full load sequence outside any message loop, installs an
+`AppDomain.FirstChanceException` handler (so exceptions are logged at
+their true throw site - reentrant native&rarr;managed callbacks otherwise
+lose their original stack trace once they cross back out through the COM
+boundary), and writes the complete exception chain to a text file. This is
+how every bug listed above was actually found and fixed.

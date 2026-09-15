@@ -17,6 +17,8 @@ namespace ControlPanel.App.Hosting;
 /// handles and the WinForms TreeView/ListView actually shown to the user.
 /// </summary>
 [ComVisible(true)]
+[ClassInterface(ClassInterfaceType.None)]
+[ComDefaultInterface(typeof(IConsole2))]
 internal sealed class MmcConsole : IConsole2, IConsoleNameSpace2, IHeaderCtrl2, IResultData, IDisplayHelp, IConsoleVerb
 {
     private readonly TreeView _tree;
@@ -99,9 +101,15 @@ internal sealed class MmcConsole : IConsole2, IConsoleNameSpace2, IHeaderCtrl2, 
         throw new NotImplementedException("This host only supports the default list/report result view, not a custom OCX or web view.");
     }
 
-    public void QueryScopeImageList(out IImageList ppImageList) => ppImageList = ScopeImages;
+    public void QueryScopeImageList(out IntPtr ppImageList)
+    {
+        ppImageList = Marshal.GetComInterfaceForObject(ScopeImages, typeof(IImageList));
+    }
 
-    public void QueryResultImageList(out IImageList ppImageList) => ppImageList = ResultImages;
+    public void QueryResultImageList(out IntPtr ppImageList)
+    {
+        ppImageList = Marshal.GetComInterfaceForObject(ResultImages, typeof(IImageList));
+    }
 
     public void UpdateAllViews(object? lpDataObject, IntPtr data, IntPtr hint)
     {
@@ -138,7 +146,10 @@ internal sealed class MmcConsole : IConsole2, IConsoleNameSpace2, IHeaderCtrl2, 
         };
     }
 
-    public void QueryConsoleVerb(out IConsoleVerb ppConsoleVerb) => ppConsoleVerb = this;
+    public void QueryConsoleVerb(out IntPtr ppConsoleVerb)
+    {
+        ppConsoleVerb = Marshal.GetComInterfaceForObject(this, typeof(IConsoleVerb));
+    }
 
     public void SelectScopeItem(IntPtr hScopeItem)
     {
@@ -148,7 +159,10 @@ internal sealed class MmcConsole : IConsole2, IConsoleNameSpace2, IHeaderCtrl2, 
         }
     }
 
-    public void GetMainWindow(out IntPtr phwnd) => phwnd = _ownerForm.Handle;
+    public void GetMainWindow(out IntPtr phwnd)
+    {
+        phwnd = _ownerForm.Handle;
+    }
 
     public void NewWindow(IntPtr hScopeItem, uint lOptions)
     {
@@ -174,9 +188,15 @@ internal sealed class MmcConsole : IConsole2, IConsoleNameSpace2, IHeaderCtrl2, 
     }
 
     [PreserveSig]
-    public int IsTaskpadViewPreferred() => 1; // S_FALSE - classic (list) view only
+    public int IsTaskpadViewPreferred()
+    {
+        return 1; // S_FALSE - classic (list) view only
+    }
 
-    public void SetStatusText(string pszStatusText) => StatusTextChanged?.Invoke(pszStatusText);
+    public void SetStatusText(string pszStatusText)
+    {
+        StatusTextChanged?.Invoke(pszStatusText);
+    }
 
     // ------------------------------------------------------------------
     // IConsoleNameSpace / IConsoleNameSpace2
