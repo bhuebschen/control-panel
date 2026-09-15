@@ -152,6 +152,8 @@ internal static class SnapInDiagnostics
             Line("Result view initialization returned successfully.");
             Line($"Root scope nodes created: {consoleRoot.Nodes.Count}");
 
+            ScopeNode? activeResultNode = session.RootNode;
+
             // Recursively expands every scope node (not just the root),
             // to reproduce/report structural issues at any depth - e.g. a
             // child that inserts no items of its own, or one that ends up
@@ -190,7 +192,26 @@ internal static class SnapInDiagnostics
                 {
                     try
                     {
-                        scopeNode.Session.ShowResults(console, scopeNode);
+                        if (!ReferenceEquals(activeResultNode, scopeNode))
+                        {
+                            if (activeResultNode is not null)
+                            {
+                                activeResultNode.Session.HideResults(console, activeResultNode);
+                            }
+
+                            // A real MMC result pane is replaced when the
+                            // selected scope node changes. Keeping the old
+                            // rows/columns makes the diagnostic accumulate
+                            // state that the interactive host never exposes
+                            // and can make a healthy snap-in look broken.
+                            console.DeleteAllRsltItems();
+                            list.Columns.Clear();
+                            activeResultNode = null;
+
+                            scopeNode.Session.ShowResults(console, scopeNode);
+                            activeResultNode = scopeNode;
+                        }
+
                         Line($"{indent}  (result rows: {console.ResultRows.Count})");
                         int shown = 0;
                         foreach (var row in console.ResultRows)
@@ -246,6 +267,12 @@ internal static class SnapInDiagnostics
             foreach (TreeNode node in consoleRoot.Nodes)
             {
                 DumpAndExpand(node, 1);
+            }
+
+            if (activeResultNode is not null)
+            {
+                activeResultNode.Session.HideResults(console, activeResultNode);
+                activeResultNode = null;
             }
 
             try

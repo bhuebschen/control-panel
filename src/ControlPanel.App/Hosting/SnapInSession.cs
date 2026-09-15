@@ -211,7 +211,7 @@ internal sealed class SnapInSession
                         $"hasDataObject={lpDataObject is not null}");
                     var notify = Marshal.GetDelegateForFunctionPointer<NotifyNative>(slotPtr);
                     int result = notify(targetItf, dataObjPtr, (int)@event, arg, param);
-                    SnapInDiagnostics.Trace($"Ra    wNotify({@event}, arg=0x{arg:X}, param=0x{param:X}, hasDataObject={lpDataObject is not null}) = 0x{result:X8}");
+                    SnapInDiagnostics.Trace($"RawNotify({@event}, arg=0x{arg:X}, param=0x{param:X}, hasDataObject={lpDataObject is not null}) = 0x{result:X8}");
                     // result < 0, not != 0: S_FALSE (1) is a legitimate
                     // success code some snap-ins return from Notify, not a
                     // failure - only the HRESULT sign bit means failure.
