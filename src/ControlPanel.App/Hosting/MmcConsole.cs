@@ -285,10 +285,21 @@ internal sealed class MmcConsole : IConsole2, IConsoleNameSpace2, IHeaderCtrl2, 
         else
         {
             parentHandle = item.relativeID;
-            parentUiNode = _consoleRoot;
-            if (parentHandle != IntPtr.Zero && _scopeNodesByHandle.TryGetValue(parentHandle, out var parentNode) && parentNode.UiNode is not null)
+            if (parentHandle == IntPtr.Zero)
+            {
+                parentUiNode = _consoleRoot;
+            }
+            else if (_scopeNodesByHandle.TryGetValue(parentHandle, out var parentNode) && parentNode.UiNode is not null)
             {
                 parentUiNode = parentNode.UiNode;
+            }
+            else
+            {
+                // Silently falling back to Console Root produces a plausible
+                // but corrupt tree and loses the evidence needed to diagnose
+                // a bad/stale HSCOPEITEM.
+                throw new InvalidOperationException(
+                    $"InsertItem: parent HSCOPEITEM 0x{parentHandle:X} is not known to this console.");
             }
 
             insertAt = (item.mask & MmcConsts.SDI_FIRST) != 0 ? 0 : parentUiNode.Nodes.Count;
@@ -301,6 +312,10 @@ internal sealed class MmcConsole : IConsole2, IConsoleNameSpace2, IHeaderCtrl2, 
             ParentHandle = parentHandle,
             Cookie = (item.mask & MmcConsts.SDI_PARAM) != 0 ? item.lParam : IntPtr.Zero,
             Session = session,
+            // Per SCOPEDATAITEM, setting SDI_CHILDREN with cChildren=0 is
+            // the explicit "leaf" declaration.  If the flag is omitted,
+            // MMC must initially assume that children may exist.
+            HasChildren = (item.mask & MmcConsts.SDI_CHILDREN) == 0 || item.cChildren > 0,
         };
 
         if ((item.mask & MmcConsts.SDI_STR) != 0)
@@ -323,11 +338,6 @@ internal sealed class MmcConsole : IConsole2, IConsoleNameSpace2, IHeaderCtrl2, 
         {
             node.OpenImageIndex = item.nOpenImage;
         }
-        if ((item.mask & MmcConsts.SDI_CHILDREN) != 0)
-        {
-            node.HasChildren = item.cChildren > 0;
-        }
-
         var uiNode = new TreeNode(node.DisplayName)
         {
             ImageIndex = node.ImageIndex,
@@ -347,6 +357,11 @@ internal sealed class MmcConsole : IConsole2, IConsoleNameSpace2, IHeaderCtrl2, 
         _scopeNodesByUiNode[uiNode] = node;
 
         item.ID = handle;
+
+        SnapInDiagnostics.Trace(
+            $"IConsoleNameSpace2.InsertItem name='{node.DisplayName}', mask=0x{item.mask:X8}, " +
+            $"relativeID=0x{item.relativeID:X}, relation=0x{relKind:X8}, " +
+            $"parent=0x{parentHandle:X}, assigned=0x{handle:X}, hasChildren={node.HasChildren}");
     }
 
     private static string ResolveDisplayName(IntPtr displayNamePtr, Func<IntPtr> resolveViaCallback)
@@ -455,6 +470,22 @@ internal sealed class MmcConsole : IConsole2, IConsoleNameSpace2, IHeaderCtrl2, 
         if ((item.mask & MmcConsts.SDI_CHILDREN) != 0)
         {
             node.HasChildren = item.cChildren > 0;
+
+            if (node.UiNode is { } uiNode && !node.ChildrenLoaded)
+            {
+                bool hasPlaceholder = uiNode.Nodes.Count == 1 &&
+                    uiNode.Nodes[0].Text == "..." &&
+                    !_scopeNodesByUiNode.ContainsKey(uiNode.Nodes[0]);
+
+                if (node.HasChildren && uiNode.Nodes.Count == 0)
+                {
+                    uiNode.Nodes.Add(new TreeNode("..."));
+                }
+                else if (!node.HasChildren && hasPlaceholder)
+                {
+                    uiNode.Nodes.Clear();
+                }
+            }
         }
     }
 
