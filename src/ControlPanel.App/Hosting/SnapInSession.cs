@@ -82,15 +82,13 @@ internal sealed class SnapInSession
             // "Services"/"Component Services" even with a null data object -
             // confirmed via FirstChanceException logging to be the true throw
             // site, not a rethrow. Bypassed via the same raw-vtable technique.
+            // TEMPORARY (live-debugging "Component Services"): forcing NULL
+            // again to step through comsnap.dll's null-data-object branch,
+            // which disassembly showed is a distinct code path (probably the
+            // real "populate my own static root" special case) from the one
+            // a real data object takes (which does nothing useful). Revert
+            // to the QueryDataObject-based lookup above once this is understood.
             IDataObject? rootDataObject = null;
-            try
-            {
-                componentData.QueryDataObject(IntPtr.Zero, DATA_OBJECT_TYPES.CCT_SCOPE, out rootDataObject);
-            }
-            catch (COMException)
-            {
-                // Some snap-ins (e.g. "Folder") genuinely have no data object for the root - null is correct there.
-            }
             RawNotify(componentData, rootDataObject, MMC_NOTIFY_TYPE.MMCN_EXPAND, new IntPtr(1), IntPtr.Zero);
 
             SendAddImages(console, session);
