@@ -19,7 +19,7 @@ namespace ControlPanel.App.Hosting;
 [ComVisible(true)]
 [ClassInterface(ClassInterfaceType.None)]
 [ComDefaultInterface(typeof(IConsole2))]
-internal sealed class MmcConsole : IConsole2, IConsoleNameSpace2, IHeaderCtrl2, IResultData, IDisplayHelp, IConsoleVerb, IControlbar, IToolbar
+internal sealed class MmcConsole : IConsole2, IConsoleNameSpace2, IHeaderCtrl2, IResultData, IDisplayHelp, IConsoleVerb, IControlbar, IToolbar, IPropertySheetProvider, IColumnData
 {
     private readonly TreeView _tree;
     private readonly ListView _list;
@@ -85,17 +85,20 @@ internal sealed class MmcConsole : IConsole2, IConsoleNameSpace2, IHeaderCtrl2, 
     // IConsole / IConsole2
     // ------------------------------------------------------------------
 
-    public void SetHeader(IHeaderCtrl pHeader)
+    public void SetHeader(IntPtr pHeader)
     {
+        SnapInDiagnostics.Trace(nameof(SetHeader));
         // Only relevant to custom (OCX/web) result views, which we don't support.
     }
 
     public void SetToolbar(IntPtr pToolbar)
     {
+        SnapInDiagnostics.Trace(nameof(SetToolbar));
     }
 
     public void QueryResultView(out object pUnknown)
     {
+        SnapInDiagnostics.Trace(nameof(QueryResultView));
         Diagnostics.Log("QueryResultView: custom OCX/web result views are not supported by this host.");
         pUnknown = null!;
         throw new NotImplementedException("This host only supports the default list/report result view, not a custom OCX or web view.");
@@ -103,11 +106,13 @@ internal sealed class MmcConsole : IConsole2, IConsoleNameSpace2, IHeaderCtrl2, 
 
     public void QueryScopeImageList(out IntPtr ppImageList)
     {
+        SnapInDiagnostics.Trace(nameof(QueryScopeImageList));
         ppImageList = Marshal.GetComInterfaceForObject(ScopeImages, typeof(IImageList));
     }
 
     public void QueryResultImageList(out IntPtr ppImageList)
     {
+        SnapInDiagnostics.Trace(nameof(QueryResultImageList));
         ppImageList = Marshal.GetComInterfaceForObject(ResultImages, typeof(IImageList));
     }
 
@@ -148,11 +153,13 @@ internal sealed class MmcConsole : IConsole2, IConsoleNameSpace2, IHeaderCtrl2, 
 
     public void QueryConsoleVerb(out IntPtr ppConsoleVerb)
     {
+        SnapInDiagnostics.Trace(nameof(QueryConsoleVerb));
         ppConsoleVerb = Marshal.GetComInterfaceForObject(this, typeof(IConsoleVerb));
     }
 
     public void SelectScopeItem(IntPtr hScopeItem)
     {
+        SnapInDiagnostics.Trace(nameof(SelectScopeItem));
         if (_scopeNodesByHandle.TryGetValue(hScopeItem, out var node) && node.UiNode is not null)
         {
             _tree.SelectedNode = node.UiNode;
@@ -161,11 +168,13 @@ internal sealed class MmcConsole : IConsole2, IConsoleNameSpace2, IHeaderCtrl2, 
 
     public void GetMainWindow(out IntPtr phwnd)
     {
+        SnapInDiagnostics.Trace(nameof(GetMainWindow));
         phwnd = _ownerForm.Handle;
     }
 
     public void NewWindow(IntPtr hScopeItem, uint lOptions)
     {
+        SnapInDiagnostics.Trace(nameof(NewWindow));
         Diagnostics.Log($"NewWindow: multiple console windows are not supported by this host (requested root handle 0x{hScopeItem:X}).");
         throw new NotImplementedException("This host only supports a single window rooted at Console Root.");
     }
@@ -190,11 +199,13 @@ internal sealed class MmcConsole : IConsole2, IConsoleNameSpace2, IHeaderCtrl2, 
     [PreserveSig]
     public int IsTaskpadViewPreferred()
     {
+        SnapInDiagnostics.Trace(nameof(IsTaskpadViewPreferred));
         return 1; // S_FALSE - classic (list) view only
     }
 
     public void SetStatusText(string pszStatusText)
     {
+        SnapInDiagnostics.Trace(nameof(SetStatusText));
         StatusTextChanged?.Invoke(pszStatusText);
     }
 
@@ -204,6 +215,7 @@ internal sealed class MmcConsole : IConsole2, IConsoleNameSpace2, IHeaderCtrl2, 
 
     public void InsertItem(ref SCOPEDATAITEM item)
     {
+        SnapInDiagnostics.Trace(nameof(IConsoleNameSpace2) + "." + nameof(InsertItem));
         var session = ActiveSession;
         if (session is null)
         {
@@ -493,6 +505,7 @@ internal sealed class MmcConsole : IConsole2, IConsoleNameSpace2, IHeaderCtrl2, 
 
     public void InsertColumn(int nCol, string title, int nFormat, int nWidth)
     {
+        SnapInDiagnostics.Trace($"{nameof(InsertColumn)}({nCol}, \"{title}\")");
         var alignment = nFormat switch
         {
             1 => HorizontalAlignment.Right,
@@ -780,6 +793,7 @@ internal sealed class MmcConsole : IConsole2, IConsoleNameSpace2, IHeaderCtrl2, 
 
     public void Create(MMC_CONTROL_TYPE nType, IntPtr pExtendControlbar, out IntPtr ppUnknown)
     {
+        SnapInDiagnostics.Trace($"{nameof(IControlbar)}.{nameof(Create)}({nType})");
         ppUnknown = nType == MMC_CONTROL_TYPE.TOOLBAR
             ? Marshal.GetComInterfaceForObject(this, typeof(IToolbar))
             : IntPtr.Zero;
@@ -816,6 +830,85 @@ internal sealed class MmcConsole : IConsole2, IConsoleNameSpace2, IHeaderCtrl2, 
 
     public void SetButtonState(int idCommand, int nState, bool bState)
     {
+    }
+
+    // ------------------------------------------------------------------
+    // IPropertySheetProvider
+    //
+    // Obtained by a snap-in via a direct QueryInterface on the IConsole
+    // pointer (same story as IControlbar above) - "Services" and "Component
+    // Services" query for this during IComponent.Initialize and fail their
+    // own Initialize with E_NOINTERFACE when it's missing entirely, since
+    // this host didn't implement it at all before. A snap-in can also use
+    // this on its own initiative (independent of the verb-triggered
+    // Properties path this host otherwise drives directly via
+    // IExtendPropertySheet.CreatePropertyPages) to pop up a sheet.
+    //
+    // Real modal property sheet UI - hosting the HPROPSHEETPAGE handles a
+    // snap-in adds through IPropertySheetCallback.AddPage via the actual
+    // Win32 PropertySheet() API - is not implemented yet; these are no-op
+    // stubs purely so QueryInterface for this interface succeeds and
+    // doesn't derail a snap-in's own Initialize.
+    // ------------------------------------------------------------------
+
+    public void CreatePropertySheet(string title, bool type, IntPtr cookie, object? pDataObject, uint dwOptions)
+    {
+        SnapInDiagnostics.Trace($"{nameof(IPropertySheetProvider)}.{nameof(CreatePropertySheet)}(\"{title}\")");
+    }
+
+    public int FindPropertySheet(IntPtr hItem, object? lpComponent, object? lpDataObject)
+    {
+        SnapInDiagnostics.Trace($"{nameof(IPropertySheetProvider)}.{nameof(FindPropertySheet)}");
+        return unchecked((int)0x80004005); // E_FAIL - no sheet is ever already open, since none are ever created yet.
+    }
+
+    public void AddPrimaryPages(object? lpUnknown, bool bCreateHandle, IntPtr hNotifyWindow, bool bScopePane)
+    {
+        SnapInDiagnostics.Trace($"{nameof(IPropertySheetProvider)}.{nameof(AddPrimaryPages)}");
+    }
+
+    public void AddExtensionPages()
+    {
+        SnapInDiagnostics.Trace($"{nameof(IPropertySheetProvider)}.{nameof(AddExtensionPages)}");
+    }
+
+    public void Show(IntPtr window, int page)
+    {
+        SnapInDiagnostics.Trace($"{nameof(IPropertySheetProvider)}.{nameof(Show)}");
+    }
+
+    // ------------------------------------------------------------------
+    // IColumnData
+    //
+    // Obtained by a snap-in via a direct QueryInterface on the IConsole
+    // pointer (same story as IControlbar/IPropertySheetProvider above) -
+    // persists per-column width/order/sort customizations across sessions.
+    // This host never saves any, so the Get* methods always report "no
+    // saved config" (a normal, expected outcome, not an error).
+    // ------------------------------------------------------------------
+
+    public void SetColumnConfigData(IntPtr pColID, IntPtr pColSetData)
+    {
+        SnapInDiagnostics.Trace($"{nameof(IColumnData)}.{nameof(SetColumnConfigData)}");
+    }
+
+    public int GetColumnConfigData(IntPtr pColID, out IntPtr ppColSetData)
+    {
+        SnapInDiagnostics.Trace($"{nameof(IColumnData)}.{nameof(GetColumnConfigData)}");
+        ppColSetData = IntPtr.Zero;
+        return unchecked((int)0x80070490); // HRESULT_FROM_WIN32(ERROR_NOT_FOUND)
+    }
+
+    public void SetColumnSortData(IntPtr pColID, IntPtr pColSortData)
+    {
+        SnapInDiagnostics.Trace($"{nameof(IColumnData)}.{nameof(SetColumnSortData)}");
+    }
+
+    public int GetColumnSortData(IntPtr pColID, out IntPtr ppColSortData)
+    {
+        SnapInDiagnostics.Trace($"{nameof(IColumnData)}.{nameof(GetColumnSortData)}");
+        ppColSortData = IntPtr.Zero;
+        return unchecked((int)0x80070490); // HRESULT_FROM_WIN32(ERROR_NOT_FOUND)
     }
 
     // ------------------------------------------------------------------

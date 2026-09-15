@@ -15,7 +15,20 @@ namespace ControlPanel.App.Interop;
 [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
 internal interface IConsole
 {
-    void SetHeader(IHeaderCtrl pHeader);
+    // pHeader as a raw IntPtr, not a typed IHeaderCtrl RCW: found live, via
+    // a Visual Studio mixed-mode debugging session (stepping through
+    // real "Services"/"Component Services" calls) - control returns
+    // directly to RunWithSession's `finally` block immediately after
+    // SetHeader is entered, meaning the exception happens marshaling
+    // *this* call, not in the snap-in's subsequent native logic as
+    // previously assumed. This is the mirror case of every other typed-
+    // custom-interface bug found this session: there it was our own CCW
+    // object marshaled *out* through a typed parameter; here it's a
+    // *native* interface pointer marshaled *in* to a strongly-typed RCW
+    // parameter on a method our own CCW implements. We never use pHeader
+    // (custom OCX/web views only), so there's no downside to leaving it
+    // unmarshaled.
+    void SetHeader(IntPtr pHeader);
     void SetToolbar(IntPtr pToolbar);
     void QueryResultView([MarshalAs(UnmanagedType.IUnknown)] out object pUnknown);
     // ppImageList/ppConsoleVerb: out parameters returning OUR OWN CCW
@@ -52,7 +65,7 @@ internal interface IConsole
 internal interface IConsole2 : IConsole
 {
     // -- IConsole (must be repeated for correct vtable layout) --
-    new void SetHeader(IHeaderCtrl pHeader);
+    new void SetHeader(IntPtr pHeader);
     new void SetToolbar(IntPtr pToolbar);
     new void QueryResultView([MarshalAs(UnmanagedType.IUnknown)] out object pUnknown);
     new void QueryScopeImageList(out IntPtr ppImageList);
@@ -213,6 +226,68 @@ internal interface IControlbar
     void Create(MMC_CONTROL_TYPE nType, IntPtr pExtendControlbar, out IntPtr ppUnknown);
     void Attach(MMC_CONTROL_TYPE nType, IntPtr lpUnknown);
     void Detach(IntPtr lpUnknown);
+}
+
+// Obtained by a snap-in via direct QueryInterface on the IConsole pointer,
+// same story as IControlbar. GUID verified against the real Windows SDK
+// header (um/MMC.h) - it differs from IExtendPropertySheet's GUID
+// (85DE64DC-...) only in the last byte before the dash, easy to
+// transcribe wrong from memory alone.
+[ComImport]
+[Guid("85DE64DE-EF21-11cf-A285-00C04FD8DBE6")]
+[InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+internal interface IPropertySheetProvider
+{
+    void CreatePropertySheet(
+        [MarshalAs(UnmanagedType.LPWStr)] string title,
+        [MarshalAs(UnmanagedType.U1)] bool type,
+        IntPtr cookie,
+        [MarshalAs(UnmanagedType.Interface)] object? pDataObject,
+        uint dwOptions);
+
+    // Real MMC returns a failure HRESULT here (not a thrown exception) to
+    // mean "no property sheet is already open for this item" - the normal,
+    // expected outcome, not an error - hence PreserveSig instead of letting
+    // the declarative stub turn it into a .NET exception on every call.
+    [PreserveSig]
+    int FindPropertySheet(
+        IntPtr hItem,
+        [MarshalAs(UnmanagedType.Interface)] object? lpComponent,
+        [MarshalAs(UnmanagedType.Interface)] object? lpDataObject);
+
+    void AddPrimaryPages(
+        [MarshalAs(UnmanagedType.Interface)] object? lpUnknown,
+        [MarshalAs(UnmanagedType.Bool)] bool bCreateHandle,
+        IntPtr hNotifyWindow,
+        [MarshalAs(UnmanagedType.Bool)] bool bScopePane);
+
+    void AddExtensionPages();
+
+    void Show(IntPtr window, int page);
+}
+
+// Obtained by a snap-in via direct QueryInterface on the IConsole pointer,
+// same story as IControlbar/IPropertySheetProvider - persists per-column
+// width/order/sort customizations across sessions. GUID from the real
+// Windows SDK header (um/MMC.h). Pointee struct layouts (SColumnSetID,
+// MMC_COLUMN_SET_DATA, MMC_SORT_SET_DATA) are not reproduced here since
+// this host never actually parses them - the raw IntPtr is opaque to us.
+[ComImport]
+[Guid("547C1354-024D-11d3-A707-00C04F8EF4CB")]
+[InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+internal interface IColumnData
+{
+    void SetColumnConfigData(IntPtr pColID, IntPtr pColSetData);
+
+    // PreserveSig: "no saved config exists for this column set" is a normal,
+    // expected outcome (this host never saves any), not an exceptional one.
+    [PreserveSig]
+    int GetColumnConfigData(IntPtr pColID, out IntPtr ppColSetData);
+
+    void SetColumnSortData(IntPtr pColID, IntPtr pColSortData);
+
+    [PreserveSig]
+    int GetColumnSortData(IntPtr pColID, out IntPtr ppColSortData);
 }
 
 [ComImport]

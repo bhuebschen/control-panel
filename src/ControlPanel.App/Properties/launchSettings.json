@@ -1,0 +1,8 @@
+{
+  "profiles": {
+    "ControlPanel.App": {
+      "commandName": "Project",
+      "debugEngines": "managed,native"
+    }
+  }
+}

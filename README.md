@@ -42,38 +42,92 @@ Windows 11 machine:
   dropping to a raw `out IntPtr` and calling
   `Marshal.GetComInterfaceForObject` explicitly instead of relying on the
   high-level marshaler for that direction.
-- **Progress, not yet fully resolved:** "Services" and "Component Services"
-  both now get further than before each fix - reaching real reentrant
-  calls into this host's `IConsole`/`IImageList` (`QueryScopeImageList`,
-  `SetHeader`) that complete successfully, with nothing further calling
-  back into this host afterward (confirmed via a durable, append-per-line
-  diagnostic log immune to losing data on a hard crash) - but still
-  ultimately fail with a generic `InvalidOperationException` when their
-  own `IComponent::Initialize` call returns. Ruled out so far, all with no
-  effect on the outcome: every marshaling variant tried, running elevated,
-  calling `CoInitializeSecurity` (in case mmc.exe configures DCOM security
-  in a way this host's default COM initialization doesn't), adding
-  `IControlbar`/`IToolbar` stubs (in case a missing controlbar makes a
-  snap-in with real toolbar buttons abort its own `Initialize`), and
-  renaming the host executable to `mmc.exe` (in case a snap-in checks its
-  own host process's name). The failing HRESULT
-  (`0x80131509` = `COR_E_INVALIDOPERATION`, the CLR's own code, confirmed
-  by calling `Initialize` through a raw vtable pointer that bypasses this
-  project's C# declarations entirely and still getting it back) is real,
-  managed-runtime-flavored evidence that *something* about hosting these
-  two specific snap-ins outside mmc.exe trips a .NET interop invariant
-  this project hasn't identified yet - and real mmc.exe on the exact same
-  machine opens both without issue, which rules out an environment/service
-  problem. Two independent ReactOS MMC reimplementation attempts
-  (`base/applications/mmc` and the more complete `mmc_new`) were checked
-  for a reference and turned out not to help - the relevant methods there
-  are unfinished `__debugbreak()` stubs or code disabled with `#if 0`,
-  never actually exercised against a real snap-in either. "Local Users and
-  Groups" hits a related but more severe "Internal CLR error"
-  (unrecoverable) at the same general point. Root cause not yet found;
-  genuinely getting further here likely needs native (mixed-mode)
-  debugging to see what these snap-ins' own code does after the last
-  callback into this host returns, which wasn't available this session.
+- **The `InvalidOperationException`/`0x80131509` mystery, solved:** live
+  mixed-mode (managed + native) debugging in Visual Studio traced the
+  exception to its real native call stack, which turned out to be nothing
+  more exotic than the standard CLR exception-raise sequence
+  (`RaiseException` &rarr; SEH dispatch &rarr; debugger-notification wait)
+  - a red herring caused by a debugger being attached, not evidence of a
+  hang or a deep runtime invariant violation. Reading `$exception.Message`
+  directly at the throw point (rather than continuing to read native call
+  stacks) gave the real message: `"Operation is not valid due to the
+  current state of the object."`, thrown by .NET's own interop stub for
+  `IComponent.Initialize`, immediately after this host's `IConsole` object
+  is marshaled as the `lpConsole` argument via
+  `[MarshalAs(UnmanagedType.IUnknown)]`. The real cause: **mmc.idl types
+  this parameter as `LPCONSOLE` (i.e. `IConsole*`), not `IUnknown*`.**
+  Marshaling it as a bare `IUnknown` pointer only happens to work for
+  snap-ins that `QueryInterface` the pointer themselves before using it
+  ("Folder", "ActiveX Control"); "Services" and "Component Services"
+  instead reinterpret the incoming pointer directly as an `IConsole`
+  vtable, per the IDL contract, and something about a mismatched
+  `IUnknown`-shaped pointer there is what .NET's own marshaler was
+  rejecting. Fixed by bypassing the declarative `[ComImport]` call for
+  `IComponent.Initialize` entirely - a raw vtable call
+  (`QueryInterface` + manual vtable slot read + `GetDelegateForFunctionPointer`)
+  using `Marshal.GetComInterfaceForObject(console, typeof(IConsole))` for a
+  correctly-typed pointer instead. `IComponentData.Notify` needed the
+  identical raw-vtable bypass for the same reason. See
+  `SnapInSession.RawInitializeComponent`/`RawNotify`.
+- **"Component Services" now progresses past `Initialize` and `Notify`
+  entirely** and fails later, at a *genuine* native `E_INVALIDARG`
+  (confirmed via the raw vtable call - no more interop-layer ambiguity)
+  from a further `Notify` call - a real, narrower, still-open question
+  about the exact `arg`/`param`/`lpDataObject` values a stricter,
+  Microsoft-authored snap-in expects for a given notification, not a bug
+  in this project's marshaling.
+- **Regression caught and fixed during this same investigation:** the raw
+  vtable calls above check the returned HRESULT manually (they bypass
+  `[ComImport]`, so nothing else checks it) - the first version treated any
+  non-zero result as failure, which broke "Folder" and "ActiveX Control"
+  (previously fully working) the moment `Notify` legitimately returned
+  `S_FALSE` (`0x00000001`, a real success code some snap-ins use, not an
+  error). Fixed by checking the HRESULT sign bit (`result < 0`) like
+  `Marshal.ThrowExceptionForHR` does internally.
+- **"Component Services" now loads fully successfully**, end-to-end, no
+  exceptions. Two more real bugs found and fixed to get there: (1) the
+  root `MMCN_EXPAND` notification to `IComponentData::Notify` was being
+  sent with `lpDataObject = NULL`, which this snap-in rejects with
+  `E_INVALIDARG` - real mmc.exe instead first calls
+  `IComponentData::QueryDataObject(0, CCT_SCOPE, ...)` to obtain a real
+  data object for the root and passes *that*; "Folder"/"ActiveX Control"
+  happened to tolerate `NULL` there, "Component Services" does not. (2)
+  The exact same declarative-`[ComImport]`-stub bug already fixed for
+  `IComponentData.Notify`/`IComponent.Initialize` also affects
+  `IComponent.Notify` (used for the `MMCN_ADD_IMAGES` notification in
+  `SendAddImages`) - fixed with the same raw-vtable bypass. (Zero root
+  scope nodes is the correct, expected outcome for this snap-in, not a
+  remaining bug - "Folder" also legitimately reports zero.)
+- **"Disk Management" also now loads successfully** (also zero root scope
+  nodes - an extension-style snap-in that talks to a separate Virtual Disk
+  Service process for its actual content, not something this host drives).
+- **"Services" still has a separate, unresolved bug**: its
+  `IComponent::Initialize` genuinely returns `E_NOINTERFACE` (confirmed via
+  the raw vtable call), after successfully completing reentrant
+  `QueryScopeImageList`/`SetHeader`/`QueryConsoleVerb` calls into this host
+  - meaning it (or something it calls into) does a `QueryInterface` this
+  host doesn't answer, immediately after `QueryConsoleVerb`, with nothing
+  further ever calling back into this host's traced methods. Checked and
+  ruled out via targeted self-checks or by adding the interface and
+  retesting: `IControlbar`/`IToolbar`, `IPropertySheetProvider` (discovered
+  missing entirely during this investigation and added - real GUID
+  `85DE64DE-EF21-11cf-A285-00C04FD8DBE6`, verified against the actual
+  Windows SDK header rather than from memory, since it differs from
+  `IExtendPropertySheet`'s GUID only in one byte), and `IColumnData`
+  (also discovered missing and added - GUID `547C1354-024D-11d3-A707-
+  00C04F8EF4CB`). None of these are ever queried for before the failure,
+  so whatever interface (or non-interop internal operation, e.g. something
+  Service-Control-Manager-related that has nothing to do with this host's
+  console implementation at all) "Services" needs immediately after
+  `QueryConsoleVerb` remains unidentified. Reordering
+  `CreateComponent`/`IComponent.Initialize` relative to the root
+  `MMCN_EXPAND` notification (tried while investigating "Component
+  Services" above) does not affect this failure either. Live mixed-mode
+  debugging (as used to crack the original `0x80131509` mystery) - setting
+  a breakpoint right after `QueryConsoleVerb` and stepping into the native
+  disassembly to see the actual next `QueryInterface`'s requested IID -
+  is the most promising next step, since automated candidate-interface
+  guessing has stopped converging.
 
 The two full successes prove the core mechanism - real snap-in DLL,
 loaded by CLSID, driven through this host's own `IConsole`/

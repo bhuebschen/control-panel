@@ -47,16 +47,186 @@ internal sealed class SnapInSession
             componentData.CreateComponent(out object componentObj);
             var component = (IComponent)componentObj;
             session.Component = component;
-            component.Initialize(console);
+
+            // Unlike IComponentData.Initialize (same object+MarshalAs(IUnknown)
+            // shape, called two lines above, works fine here), calling
+            // IComponent.Initialize through the declarative [ComImport]
+            // interface throws InvalidOperationException ("Operation is not
+            // valid due to the current state of the object") for "Services"
+            // and "Component Services" specifically - confirmed via
+            // FirstChanceException logging to be the true throw site, not a
+            // rethrow of some other failure, and confirmed via live
+            // debugging that the snap-in's native Initialize does get
+            // entered (it calls back into SetHeader/QueryScopeImageList
+            // before this surfaces). Bypassing coreclr's own interop stub
+            // for just this one call - identical technique already proven
+            // for QueryScopeImageList/QueryResultImageList/QueryConsoleVerb -
+            // avoids whatever internal state check the declarative stub is
+            // failing here.
+            RawInitializeComponent(component, console);
 
             // Ask the primary snap-in to insert its static root node(s)
             // (parent handle 0 == our synthetic "Console Root").
-            componentData.Notify(null, MMC_NOTIFY_TYPE.MMCN_EXPAND, new IntPtr(1), IntPtr.Zero);
+            //
+            // Tried reordering this before CreateComponent/IComponent.Initialize
+            // (matching a hypothesis that real mmc.exe defers IComponent
+            // creation until a result view is needed) - it did not fix
+            // "Component Services" (identical E_INVALIDARG) and made
+            // "Services" fail earlier/differently (E_UNEXPECTED here instead
+            // of E_NOINTERFACE at IComponent.Initialize), so call order
+            // relative to IComponent is not the cause. Reverted to this order,
+            // which is what "Folder"/"ActiveX Control" were validated against.
+            //
+            // The declarative [ComImport] Notify call throws ArgumentException
+            // ("Value does not fall within the expected range") for
+            // "Services"/"Component Services" even with a null data object -
+            // confirmed via FirstChanceException logging to be the true throw
+            // site, not a rethrow. Bypassed via the same raw-vtable technique.
+            IDataObject? rootDataObject = null;
+            try
+            {
+                componentData.QueryDataObject(IntPtr.Zero, DATA_OBJECT_TYPES.CCT_SCOPE, out rootDataObject);
+            }
+            catch (COMException)
+            {
+                // Some snap-ins (e.g. "Folder") genuinely have no data object for the root - null is correct there.
+            }
+            RawNotify(componentData, rootDataObject, MMC_NOTIFY_TYPE.MMCN_EXPAND, new IntPtr(1), IntPtr.Zero);
 
             SendAddImages(console, session);
         });
 
         return session;
+    }
+
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    private delegate int ComponentInitializeNative(IntPtr @this, IntPtr lpConsole);
+
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    private delegate int NotifyNative(IntPtr @this, IntPtr lpDataObject, int @event, IntPtr arg, IntPtr param);
+
+    /// <summary>
+    /// Raw-vtable Notify call - see the call sites for why. targetIid/slot
+    /// select IComponentData::Notify (slot 5) or IComponent::Notify (slot 4);
+    /// the vtable layout is QueryInterface/AddRef/Release followed by each
+    /// interface's own methods in mmc.idl declaration order.
+    /// </summary>
+    private static void RawNotify(object target, Guid targetIid, int notifySlot, IDataObject? lpDataObject, MMC_NOTIFY_TYPE @event, IntPtr arg, IntPtr param)
+    {
+        IntPtr targetUnk = Marshal.GetIUnknownForObject(target);
+        try
+        {
+            int hr = Marshal.QueryInterface(targetUnk, ref targetIid, out IntPtr targetItf);
+            Marshal.ThrowExceptionForHR(hr, new IntPtr(-1));
+            try
+            {
+                IntPtr dataObjPtr = lpDataObject is null ? IntPtr.Zero : Marshal.GetComInterfaceForObject(lpDataObject, typeof(IDataObject));
+                try
+                {
+                    NativePointerGuard.EnsureReadable(targetItf, $"{targetIid:B} interface pointer");
+                    IntPtr vtable = Marshal.ReadIntPtr(targetItf, 0);
+                    NativePointerGuard.EnsureReadable(vtable, $"{targetIid:B} vtable");
+                    IntPtr slotPtr = Marshal.ReadIntPtr(vtable, notifySlot * IntPtr.Size);
+                    NativePointerGuard.EnsureExecutable(slotPtr, $"{targetIid:B} vtable slot {notifySlot} (Notify)");
+                    SnapInDiagnostics.Trace($"RawNotify target={targetItf:X} vtable={vtable:X} slot[{notifySlot}]={slotPtr:X}");
+                    var notify = Marshal.GetDelegateForFunctionPointer<NotifyNative>(slotPtr);
+                    int result = notify(targetItf, dataObjPtr, (int)@event, arg, param);
+                    SnapInDiagnostics.Trace($"RawNotify({@event}, arg=0x{arg:X}, param=0x{param:X}, hasDataObject={lpDataObject is not null}) = 0x{result:X8}");
+                    // result < 0, not != 0: S_FALSE (1) is a legitimate
+                    // success code some snap-ins return from Notify, not a
+                    // failure - only the HRESULT sign bit means failure.
+                    if (result < 0)
+                    {
+                        throw new COMException($"Raw Notify({@event}) returned HRESULT 0x{result:X8}.", result);
+                    }
+                }
+                finally
+                {
+                    if (dataObjPtr != IntPtr.Zero)
+                    {
+                        Marshal.Release(dataObjPtr);
+                    }
+                }
+            }
+            finally
+            {
+                Marshal.Release(targetItf);
+            }
+        }
+        finally
+        {
+            Marshal.Release(targetUnk);
+        }
+    }
+
+    private static void RawNotify(IComponentData target, IDataObject? lpDataObject, MMC_NOTIFY_TYPE @event, IntPtr arg, IntPtr param) =>
+        RawNotify(target, typeof(IComponentData).GUID, 5, lpDataObject, @event, arg, param);
+
+    private static void RawNotify(IComponent target, IDataObject? lpDataObject, MMC_NOTIFY_TYPE @event, IntPtr arg, IntPtr param) =>
+        RawNotify(target, typeof(IComponent).GUID, 4, lpDataObject, @event, arg, param);
+
+    /// <summary>
+    /// Manually resolves and invokes IComponent::Initialize's vtable slot
+    /// (slot 3: QueryInterface, AddRef, Release, then Initialize as the
+    /// first method IComponent declares), bypassing the declarative
+    /// [ComImport] interface call that throws InvalidOperationException for
+    /// some snap-ins - see the call site in Load() for the full story.
+    /// </summary>
+    private static void RawInitializeComponent(IComponent component, MmcConsole console)
+    {
+        var iid = typeof(IComponent).GUID;
+        // mmc.idl declares this parameter as LPCONSOLE (= IConsole*), not
+        // IUnknown* - a snap-in is entitled to use the pointer directly as
+        // an IConsole vtable without QueryInterface-ing it first. Handing
+        // out our CCW's bare IUnknown identity pointer instead (as the
+        // declarative [MarshalAs(UnmanagedType.IUnknown)] binding effectively
+        // did) only happens to work for snap-ins that QI before use.
+        IntPtr consoleUnk = Marshal.GetComInterfaceForObject(console, typeof(IConsole));
+        try
+        {
+            IntPtr componentUnk = Marshal.GetIUnknownForObject(component);
+            try
+            {
+                int hr = Marshal.QueryInterface(componentUnk, ref iid, out IntPtr componentItf);
+                // The IntPtr(-1) "ignore IErrorInfo" overload is deliberate:
+                // the default overload picks up whatever IErrorInfo happens
+                // to be sitting on the current thread, which can belong to a
+                // completely unrelated earlier COM call and produces a
+                // misleading exception message/type for *this* HRESULT.
+                Marshal.ThrowExceptionForHR(hr, new IntPtr(-1));
+                try
+                {
+                    NativePointerGuard.EnsureReadable(componentItf, $"{iid:B} interface pointer");
+                    IntPtr vtable = Marshal.ReadIntPtr(componentItf, 0);
+                    NativePointerGuard.EnsureReadable(vtable, $"{iid:B} vtable");
+                    IntPtr initializeSlot = Marshal.ReadIntPtr(vtable, 3 * IntPtr.Size);
+                    NativePointerGuard.EnsureExecutable(initializeSlot, $"{iid:B} vtable slot 3 (Initialize)");
+                    SnapInDiagnostics.Trace($"RawInitializeComponent target={componentItf:X} vtable={vtable:X} slot[3]={initializeSlot:X}");
+                    var initialize = Marshal.GetDelegateForFunctionPointer<ComponentInitializeNative>(initializeSlot);
+                    int result = initialize(componentItf, consoleUnk);
+                    // result < 0, not != 0: only the HRESULT sign bit means
+                    // failure - see the identical fix in RawNotify below for
+                    // why (S_FALSE == 1 broke "ActiveX Control"/"Folder" here).
+                    if (result < 0)
+                    {
+                        throw new COMException(
+                            $"Raw IComponent::Initialize returned HRESULT 0x{result:X8}.", result);
+                    }
+                }
+                finally
+                {
+                    Marshal.Release(componentItf);
+                }
+            }
+            finally
+            {
+                Marshal.Release(componentUnk);
+            }
+        }
+        finally
+        {
+            Marshal.Release(consoleUnk);
+        }
     }
 
     /// <summary>
@@ -92,7 +262,11 @@ internal sealed class SnapInSession
         IntPtr imageListPtr = Marshal.GetComInterfaceForObject(console.ResultImages, typeof(IImageList));
         try
         {
-            session.Component.Notify(null, MMC_NOTIFY_TYPE.MMCN_ADD_IMAGES, imageListPtr, IntPtr.Zero);
+            // Same declarative-interop-stub bug as the other Notify/Initialize
+            // calls above ("Value does not fall within the expected range")
+            // hits IComponent.Notify too for "Component Services" - bypassed
+            // via the same raw-vtable technique.
+            RawNotify(session.Component, null, MMC_NOTIFY_TYPE.MMCN_ADD_IMAGES, imageListPtr, IntPtr.Zero);
         }
         catch (COMException)
         {

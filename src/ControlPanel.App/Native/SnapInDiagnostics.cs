@@ -1,7 +1,9 @@
 using System.Drawing;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Windows.Forms;
 using ControlPanel.App.Hosting;
+using ControlPanel.App.Interop;
 
 namespace ControlPanel.App.Native;
 
@@ -18,10 +20,38 @@ namespace ControlPanel.App.Native;
 /// </summary>
 internal static class SnapInDiagnostics
 {
+    private static string? _tracePath;
+
+    /// <summary>
+    /// Durable, immediate-append entry logging for MmcConsole callbacks -
+    /// a no-op outside RunLoadDiagnostic (normal MainForm usage never sets
+    /// _tracePath). Distinct from FirstChanceException logging: this fires
+    /// on *every* call, not just ones that throw, so it can show the last
+    /// successfully-completed callback before a native call fails with no
+    /// managed exception at all (e.g. a plain HRESULT failure).
+    /// </summary>
+    public static void Trace(string message)
+    {
+        if (_tracePath is null)
+        {
+            return;
+        }
+
+        try
+        {
+            File.AppendAllText(_tracePath, $"[Trace] {message}{Environment.NewLine}");
+        }
+        catch
+        {
+            // Best-effort only.
+        }
+    }
+
     public static void RunLoadDiagnostic(string nameOrClsid, string? outputPath)
     {
         outputPath ??= Path.Combine(Path.GetTempPath(), "controlpanel-diag.txt");
         File.WriteAllText(outputPath, string.Empty);
+        _tracePath = outputPath;
 
         void Line(string text)
         {
@@ -84,6 +114,32 @@ internal static class SnapInDiagnostics
 
             var console = new MmcConsole(tree, list, consoleRoot, scopeImages, resultImages, ownerForm);
 
+            // Self-check: does our own CCW actually answer QueryInterface for
+            // IControlbar/IToolbar? These were added specifically because
+            // "Services"/"Component Services" were suspected to probe for
+            // them early - if QI itself fails despite MmcConsole declaring
+            // both interfaces, the bug is in how the CCW exposes them, not
+            // in whether the snap-in asks for them.
+            {
+                IntPtr consoleUnk = Marshal.GetIUnknownForObject(console);
+                try
+                {
+                    var controlbarIid = typeof(IControlbar).GUID;
+                    int hr1 = Marshal.QueryInterface(consoleUnk, ref controlbarIid, out IntPtr pControlbar);
+                    Line($"Self-check QI(IControlbar {controlbarIid:B}) = 0x{hr1:X8}");
+                    if (pControlbar != IntPtr.Zero) Marshal.Release(pControlbar);
+
+                    var toolbarIid = typeof(IToolbar).GUID;
+                    int hr2 = Marshal.QueryInterface(consoleUnk, ref toolbarIid, out IntPtr pToolbar);
+                    Line($"Self-check QI(IToolbar {toolbarIid:B}) = 0x{hr2:X8}");
+                    if (pToolbar != IntPtr.Zero) Marshal.Release(pToolbar);
+                }
+                finally
+                {
+                    Marshal.Release(consoleUnk);
+                }
+            }
+
             Line("Calling SnapInSession.Load()...");
             var session = SnapInSession.Load(match, console);
             Line("SnapInSession.Load() returned successfully.");
@@ -114,6 +170,7 @@ internal static class SnapInDiagnostics
         finally
         {
             AppDomain.CurrentDomain.FirstChanceException -= firstChance;
+            _tracePath = null;
             Console.WriteLine($"(full log written to {outputPath})");
         }
     }
