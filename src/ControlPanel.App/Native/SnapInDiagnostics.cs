@@ -87,8 +87,14 @@ internal static class SnapInDiagnostics
             var snapIns = SnapInRegistry.EnumerateSnapIns();
             Line($"Found {snapIns.Count} registered snap-ins.");
 
+            // CLSID, then exact name, then substring - in that order. Without
+            // the exact-name step, "Services" matched "Component Services"
+            // instead (Contains() found it first), silently testing the
+            // wrong snap-in entirely rather than the one actually asked for.
             var match = snapIns.FirstOrDefault(s =>
                     string.Equals(s.Clsid.ToString("B"), nameOrClsid, StringComparison.OrdinalIgnoreCase))
+                ?? snapIns.FirstOrDefault(s =>
+                    string.Equals(s.Name, nameOrClsid, StringComparison.OrdinalIgnoreCase))
                 ?? snapIns.FirstOrDefault(s =>
                     s.Name.Contains(nameOrClsid, StringComparison.OrdinalIgnoreCase));
 

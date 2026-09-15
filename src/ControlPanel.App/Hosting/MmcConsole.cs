@@ -180,12 +180,104 @@ internal sealed class MmcConsole : IConsole2, IConsoleNameSpace2, IHeaderCtrl2, 
         SnapInDiagnostics.Trace(nameof(SetToolbar));
     }
 
+    /// <summary>
+    /// Fired when the currently-shown node's result view type changes -
+    /// null/empty for the standard list view, a CLSID string (as
+    /// IComponent::GetResultViewType returns it, e.g.
+    /// "{AEB84C83-95DC-11D0-B7FC-B61140119C4A}") for a custom OCX view.
+    /// MainForm owns the actual UI swap (hiding the ListView, creating/
+    /// destroying a GenericAxHost) since MmcConsole has no Control of its
+    /// own; it reports the resulting COM object back via
+    /// CustomResultViewObject so QueryResultView can hand it to the snap-in.
+    /// </summary>
+    public event Action<string?>? ResultViewTypeChanged;
+
+    /// <summary>
+    /// Set by MainForm once it has created (or torn down) the
+    /// GenericAxHost for the current node's custom result view - this is
+    /// exactly what QueryResultView must return to the snap-in, since a
+    /// custom view is driven directly through whatever interface this
+    /// object implements, not through IResultData/IHeaderCtrl2.
+    /// </summary>
+    public object? CustomResultViewObject { get; set; }
+
+    /// <summary>
+    /// Whether IComponent::GetResultViewType actually reported a custom
+    /// view for the node currently being shown - distinct from whether we
+    /// managed to create a real object for it (CustomResultViewObject).
+    /// Needed to tell apart the two very different reasons
+    /// CustomResultViewObject can be null: "no custom view was ever
+    /// requested here" (safe to paper over, see below) vs. "one was
+    /// requested but this host couldn't actually produce it" (e.g. the
+    /// headless --diag-load-snapin path, which has no MainForm to create a
+    /// GenericAxHost at all, or GenericAxHost construction itself failing) -
+    /// silently handing the snap-in something else in the second case is
+    /// how "Component Services" (a genuine custom-view snap-in) crashed
+    /// when tested that way: it got this console object standing in for
+    /// its real result view and dereferenced it through an interface this
+    /// object doesn't implement.
+    /// </summary>
+    private bool _customViewRequestedForCurrentNode;
+
+    public void NotifyResultViewType(string? viewType)
+    {
+        _customViewRequestedForCurrentNode = viewType is not null;
+        ResultViewTypeChanged?.Invoke(viewType);
+    }
+
+    /// <summary>
+    /// True right after NotifyResultViewType(nonNull) if nothing produced a
+    /// real CustomResultViewObject for it - no MainForm subscribed (the
+    /// headless --diag-load-snapin path), or GenericAxHost construction
+    /// itself failed. SnapInSession.ShowResults checks this *before* MMCN_SHOW:
+    /// sending it anyway is what actually crashed "Component Services" -
+    /// the snap-in's own MMCN_SHOW handler for a custom view apparently
+    /// needs real in-place-activation window state (a live HWND, message
+    /// pump) that plain existing is not enough to provide, and it doesn't
+    /// fail gracefully without it.
+    /// </summary>
+    public bool HasUnresolvedCustomView => _customViewRequestedForCurrentNode && CustomResultViewObject is null;
+
     public void QueryResultView(out object pUnknown)
     {
         SnapInDiagnostics.Trace(nameof(QueryResultView));
-        Diagnostics.Log("QueryResultView: custom OCX/web result views are not supported by this host.");
-        pUnknown = null!;
-        throw new NotImplementedException("This host only supports the default list/report result view, not a custom OCX or web view.");
+
+        if (CustomResultViewObject is not null)
+        {
+            pUnknown = CustomResultViewObject;
+            return;
+        }
+
+        if (_customViewRequestedForCurrentNode)
+        {
+            // A real custom view was asked for (GetResultViewType returned
+            // a CLSID) but isn't actually available right now - most likely
+            // no MainForm exists to host a GenericAxHost (the headless
+            // diagnostic), or creating it failed. Handing back "this" here
+            // would be actively wrong, not just unhelpful: unlike the
+            // fallback below, this snap-in has every reason to believe a
+            // real custom view exists and will dereference whatever it
+            // gets through that view's actual interface.
+            Diagnostics.Log("QueryResultView: a custom result view was requested for this node but is not available (no UI host, or creation failed) - failing.");
+            pUnknown = null!;
+            throw new NotSupportedException("A custom MMC result view was requested but is not available in this context.");
+        }
+
+        // Used to throw here unconditionally (-> E_NOTIMPL/NotImplementedException).
+        // Confirmed via live debugging that "Performance Monitor"
+        // (wdc.dll!WdcComponent::Notify) crashes reading address
+        // 0xFFFFFFFFFFFFFFFF right after calling this for a node that
+        // legitimately uses the standard view (GetResultViewType already
+        // reported E_NOTIMPL/no custom view for it) - it apparently calls
+        // QueryResultView unconditionally regardless of that, and doesn't
+        // check this call's own HRESULT before dereferencing whatever
+        // pUnknown ends up holding. Returning this object itself - always
+        // real, non-null, and already COM-visible - instead of failing
+        // means a snap-in that leaves its own pointer uninitialized on
+        // failure gets a genuine pointer instead of garbage, even though
+        // it isn't the special result-view interface it was hoping for.
+        Diagnostics.Log("QueryResultView: no custom result view was requested for the current node - returning this console instead of failing.");
+        pUnknown = this;
     }
 
     public void QueryScopeImageList(out IntPtr ppImageList)

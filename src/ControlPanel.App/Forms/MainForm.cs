@@ -25,8 +25,10 @@ internal sealed class MainForm : Form
     private readonly ToolStripButton _refreshToolButton;
 
     private readonly MmcConsole _console;
+    private readonly Panel _resultPanel;
     private readonly List<SnapInSession> _sessions = new();
     private ScopeNode? _currentNode;
+    private GenericAxHost? _customResultHost;
 
     private enum ActivePane { Scope, Result }
 
@@ -87,7 +89,15 @@ internal sealed class MainForm : Form
             Panel2MinSize = 100,
         };
         splitContainer.Panel1.Controls.Add(_tree);
-        splitContainer.Panel2.Controls.Add(_list);
+
+        // A plain container for the result pane, rather than adding _list
+        // straight to Panel2: a custom MMC result view (see
+        // GenericAxHost/MmcConsole.ResultViewTypeChanged) needs to swap in
+        // an ActiveX-hosted control here in _list's place, and needs the
+        // exact same Dock=Fill parent to do that cleanly.
+        _resultPanel = new Panel { Dock = DockStyle.Fill };
+        _resultPanel.Controls.Add(_list);
+        splitContainer.Panel2.Controls.Add(_resultPanel);
 
         _statusLabel = new ToolStripStatusLabel { Text = "Ready" };
         _statusStrip = new StatusStrip();
@@ -133,6 +143,7 @@ internal sealed class MainForm : Form
 
         _console = new MmcConsole(_tree, _list, _consoleRootNode, _scopeImages, _resultImages, this);
         _console.StatusTextChanged += text => _statusLabel.Text = text;
+        _console.ResultViewTypeChanged += OnResultViewTypeChanged;
 
         _consoleRootNode.Expand();
         UpdateVerbBasedUiState();
@@ -217,6 +228,56 @@ internal sealed class MainForm : Form
         UpdateVerbBasedUiState();
     }
 
+    /// <summary>
+    /// Swaps the result pane between the standard ListView and a
+    /// GenericAxHost-hosted custom view, per MmcConsole.ResultViewTypeChanged
+    /// (fired by SnapInSession.EnsureResultView reading
+    /// IComponent::GetResultViewType for whatever node is now shown).
+    /// Reports the created COM object back to MmcConsole.CustomResultViewObject
+    /// so QueryResultView can hand it to the snap-in.
+    /// </summary>
+    private void OnResultViewTypeChanged(string? viewType)
+    {
+        if (_customResultHost is not null)
+        {
+            _resultPanel.Controls.Remove(_customResultHost);
+            _console.CustomResultViewObject = null;
+            _customResultHost.Dispose();
+            _customResultHost = null;
+        }
+
+        if (string.IsNullOrWhiteSpace(viewType))
+        {
+            _list.Visible = true;
+            return;
+        }
+
+        _list.Visible = false;
+
+        try
+        {
+            var host = new GenericAxHost(viewType) { Dock = DockStyle.Fill };
+            _resultPanel.Controls.Add(host);
+            // Forces the underlying ActiveX object to actually be created
+            // now (AxHost otherwise defers this until the control's window
+            // handle is created some other way), so GetOcxWrapper() below
+            // has something real to return.
+            host.CreateControl();
+            _customResultHost = host;
+            _console.CustomResultViewObject = host.GetOcxWrapper();
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(
+                this,
+                $"Could not create the custom result view '{viewType}':\n{ex.Message}",
+                "Custom Result View",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Warning);
+            _list.Visible = true;
+        }
+    }
+
     private void Tree_BeforeExpand(object? sender, TreeViewCancelEventArgs e)
     {
         if (_console.NodesByUiNode.TryGetValue(e.Node!, out var node))
@@ -239,6 +300,15 @@ internal sealed class MainForm : Form
 
         _console.DeleteAllRsltItems();
         _list.Columns.Clear();
+
+        // Real mmc.exe apparently populates a node's children as soon as it
+        // is selected, not only when the user visually clicks its +/-
+        // glyph - confirmed via "Performance Monitor" crashing in
+        // WdcResourceMonitorNode::OnShow when a node's children were never
+        // enumerated yet (its result view assumes they already exist), and
+        // not crashing once they'd already been expanded first. ExpandNode
+        // is a safe no-op for a node with no children or already loaded.
+        node.Session.ExpandNode(_console, node);
 
         _currentNode = node;
         node.Session.ShowResults(_console, node);

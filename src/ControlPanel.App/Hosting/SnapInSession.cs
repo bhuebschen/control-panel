@@ -442,7 +442,7 @@ internal sealed class SnapInSession
 
     public void ExpandNode(MmcConsole console, ScopeNode node)
     {
-        if (node.ChildrenLoaded)
+        if (node.ChildrenLoaded || !node.HasChildren)
         {
             return;
         }
@@ -511,7 +511,27 @@ internal sealed class SnapInSession
             // optional query.  Besides choosing standard/custom view, some
             // native snap-ins use it to establish the per-node view state
             // consumed by their following MMCN_SHOW handler.
-            EnsureStandardResultView(node);
+            EnsureResultView(console, node);
+
+            if (console.HasUnresolvedCustomView)
+            {
+                // Confirmed via live testing against "Component Services":
+                // sending MMCN_SHOW to a snap-in that just asked for a
+                // custom result view it isn't actually getting crashes the
+                // whole process (an unrecoverable AccessViolationException
+                // deep in the snap-in's own native code, not anything this
+                // host's own marshaling does) - the snap-in's MMCN_SHOW
+                // handler for a custom view apparently needs real in-place-
+                // activation window state this host either didn't have a
+                // chance to create yet (no MainForm, e.g. the headless
+                // --diag-load-snapin path) or failed to create, and it
+                // doesn't fail gracefully without it. Failing cleanly here
+                // beats a hard crash, and matches this host's existing,
+                // honest "no custom OCX/web result views" scope boundary.
+                throw new NotSupportedException(
+                    $"'{Info.Name}' requested a custom MMC result view for '{node.DisplayName}' " +
+                    "that could not be created in this context.");
+            }
 
             // MMCN_SHOW(TRUE) is the notification that tells the snap-in to
             // set up and populate the result pane.  Only after that pane
@@ -525,7 +545,7 @@ internal sealed class SnapInSession
         node.ResultsLoaded = true;
     }
 
-    private void EnsureStandardResultView(ScopeNode node)
+    private void EnsureResultView(MmcConsole console, ScopeNode node)
     {
         IntPtr viewTypePtr = IntPtr.Zero;
         int viewOptions = 0;
@@ -553,18 +573,21 @@ internal sealed class SnapInSession
             $"IComponent.GetResultViewType(cookie=0x{node.Cookie:X}) = 0x{hr:X8}, " +
             $"viewType='{viewType ?? "<standard>"}', options=0x{viewOptions:X8}");
 
-        if (hr < 0)
+        // E_NOTIMPL ("Performance Monitor" returns this for at least its
+        // root node) means "I have no custom view to offer here", the same
+        // as a null/empty viewType - not a fatal error. Only a genuine
+        // failure HRESULT (anything else negative) is fatal.
+        const int E_NOTIMPL = unchecked((int)0x80004001);
+        if (hr < 0 && hr != E_NOTIMPL)
         {
             throw new COMException(
                 $"IComponent.GetResultViewType returned HRESULT 0x{hr:X8}.", hr);
         }
 
-        if (!string.IsNullOrWhiteSpace(viewType))
-        {
-            throw new NotSupportedException(
-                $"'{Info.Name}' requested the custom MMC result view '{viewType}' for " +
-                $"'{node.DisplayName}'. This host currently supports standard list views only.");
-        }
+        // Tells MainForm to swap the ListView for a GenericAxHost bound to
+        // this CLSID (or back to the ListView, for null/empty) - see
+        // MmcConsole.ResultViewTypeChanged/CustomResultViewObject.
+        console.NotifyResultViewType(hr == E_NOTIMPL || string.IsNullOrWhiteSpace(viewType) ? null : viewType);
     }
 
     public void HideResults(MmcConsole console, ScopeNode node)
